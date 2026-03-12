@@ -1101,3 +1101,849 @@ max_diff_tokens = 8000
 # 生成测试的保留天数（自动清理旧报告）
 retention_days = 30
 ```
+
+---
+
+## 十一、用户管理模块
+
+### 11.1 功能概述
+
+基于 Git 提交记录中的 author 信息自动发现用户。当 `git_review` 或 `test_gen` 任务完成后，系统从 commit range 中提取所有 commit 的 `author_name` 和 `author_email`，自动在 `users` 表中创建记录。用户通过 Git 邮箱 + 密码登录 Web 界面查看个人相关的审核报告和消息。
+
+### 11.2 数据库表：`users`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PK | 自增主键 |
+| email | TEXT NOT NULL UNIQUE | Git 提交邮箱（登录账号） |
+| display_name | TEXT NOT NULL | Git 提交中的 author name |
+| password_hash | TEXT | bcrypt 哈希，NULL 表示尚未设置密码 |
+| status | TEXT NOT NULL DEFAULT 'inactive' | `inactive`（自动发现，未设密码）/ `active`（已设密码） |
+| avatar_url | TEXT | 头像 URL（可选，默认由邮箱生成 Gravatar） |
+| created_at | DATETIME DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | DATETIME DEFAULT CURRENT_TIMESTAMP | 最后更新时间 |
+
+### 11.3 用户自动发现流程
+
+```
+git_review / test_gen 任务完成
+       │
+       ▼
+从 commit range 提取所有 commit 的 author_email + author_name
+       │
+       ▼
+对每个 author_email：
+  ├── 已存在 → 跳过（可选：更新 display_name）
+  └── 不存在 → INSERT INTO users (email, display_name, status='inactive')
+```
+
+#### CommitEntry 扩展
+
+当前 `CommitEntry` 仅含 `id` 和 `summary`，需扩展：
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitEntry {
+    pub id: String,
+    pub summary: String,
+    pub author_name: String,    // 新增
+    pub author_email: String,   // 新增
+}
+```
+
+`git_log` 函数中从 `commit.author()` 提取：
+
+```rust
+.map(|commit| CommitEntry {
+    id: commit.id().to_string(),
+    summary: commit.summary().unwrap_or("").to_string(),
+    author_name: commit.author().name().unwrap_or("").to_string(),
+    author_email: commit.author().email().unwrap_or("").to_string(),
+})
+```
+
+### 11.4 用户激活（设置密码）
+
+首次发现的用户处于 `inactive` 状态，需通过 Web 界面设置密码后变为 `active`：
+
+```
+POST /api/auth/activate
+Content-Type: application/json
+
+{
+  "email": "dev@example.com",
+  "password": "my-secure-password"
+}
+```
+
+- 验证 email 存在且 status = `inactive`
+- 密码使用 `bcrypt` 哈希（cost=12）
+- 更新 `password_hash` 和 `status='active'`
+- 返回 JWT token
+
+### 11.5 用户模型（Rust）
+
+```rust
+#[derive(Debug, Clone)]
+pub struct User {
+    pub id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub password_hash: Option<String>,
+    pub status: UserStatus,
+    pub avatar_url: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserStatus {
+    Inactive,  // 自动发现，未设置密码
+    Active,    // 已设置密码，可正常登录
+}
+
+impl UserStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            UserStatus::Inactive => "inactive",
+            UserStatus::Active => "active",
+        }
+    }
+}
+```
+
+### 11.6 数据库操作
+
+```rust
+impl Database {
+    /// 根据邮箱查找或创建用户（幂等）
+    pub fn ensure_user(&self, email: &str, display_name: &str) -> Result<i64> {
+        // INSERT OR IGNORE + SELECT id
+    }
+
+    /// 批量确保用户存在（从 commit authors）
+    pub fn ensure_users_from_commits(&self, commits: &[CommitEntry]) -> Result<Vec<i64>> {
+        // 去重 email → 逐一 ensure_user
+    }
+
+    /// 根据邮箱查找用户（登录用）
+    pub fn get_user_by_email(&self, email: &str) -> Result<Option<User>> { ... }
+
+    /// 激活用户（设置密码）
+    pub fn activate_user(&self, email: &str, password_hash: &str) -> Result<()> { ... }
+}
+```
+
+---
+
+## 十二、消息模块
+
+### 12.1 功能概述
+
+审核报告（git_review）完成后，系统根据 commit range 内每个 commit 的 author_email，将**整份审核报告**作为一条消息同步到对应用户的消息列表。每个涉及的开发者都会收到同一份报告的引用，但各自独立维护已读/未读状态。
+
+### 12.2 数据库表：`messages`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PK | 自增主键 |
+| user_id | INTEGER NOT NULL FK | 关联 `users.id`（接收人） |
+| task_id | INTEGER NOT NULL FK | 关联 `tasks.id`（来源任务） |
+| repo_id | INTEGER FK | 关联 `git_repos.id` |
+| title | TEXT NOT NULL | 消息标题（如 "my-project 代码审查报告 2026-03-13"） |
+| content | TEXT NOT NULL | 消息正文（审核报告全文或摘要） |
+| report_path | TEXT | 报告文件路径（`check/repo/date-review.md`） |
+| commit_range | TEXT | 相关 commit 范围（如 `abc123..def456`） |
+| is_read | BOOLEAN NOT NULL DEFAULT 0 | 已读标记 |
+| created_at | DATETIME DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+
+**索引**：
+- `idx_messages_user_id` — 按用户查询消息列表
+- `idx_messages_user_unread` — `(user_id, is_read)` 快速统计未读数
+
+### 12.3 消息同步流程
+
+```
+git_review 任务执行完成（status = done）
+       │
+       ▼
+从 JobOutput 获取 commit_authors: Vec<CommitAuthor>
+       │
+       ▼
+调用 Database::ensure_users_from_commits() 确保用户存在
+       │
+       ▼
+对每个去重后的 author_email：
+  └── 查找 user_id
+  └── INSERT INTO messages (user_id, task_id, repo_id, title, content, report_path, commit_range)
+       │
+       ▼
+记录日志：info!(users_count, messages_created, "messages synced")
+```
+
+#### 集成切入点：`scheduler/mod.rs`
+
+在 `Dispatcher::complete_task` 中，`git_review` 任务成功完成后增加消息同步调用：
+
+```rust
+async fn complete_task(&self, task: &Task, result: Result<JobOutput>) -> Result<()> {
+    match result {
+        Ok(output) => {
+            self.database.finish_task(task, TaskStatus::Done, Some(&output.task_result))?;
+
+            // ── 新增：消息同步 ──
+            if task.task_type == TaskType::GitReview {
+                if let Some(ref authors) = output.commit_authors {
+                    if let Err(e) = self.sync_messages(task, &output, authors) {
+                        warn!(%e, task_id = task.id, "message sync failed");
+                    }
+                }
+            }
+
+            self.notify(task, TaskStatus::Done, &output.summary, output.repo_name, output.report_path).await;
+        }
+        // ...
+    }
+}
+```
+
+#### JobOutput 扩展
+
+```rust
+pub struct JobOutput {
+    pub task_result: String,
+    pub summary: String,
+    pub repo_name: Option<String>,
+    pub report_path: Option<String>,
+    pub commit_authors: Option<Vec<CommitAuthor>>,   // 新增
+    pub commit_range: Option<String>,                // 新增
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitAuthor {
+    pub name: String,
+    pub email: String,
+}
+```
+
+### 12.4 消息模型（Rust）
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub id: i64,
+    pub user_id: i64,
+    pub task_id: i64,
+    pub repo_id: Option<i64>,
+    pub title: String,
+    pub content: String,
+    pub report_path: Option<String>,
+    pub commit_range: Option<String>,
+    pub is_read: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 消息列表项（不含全文 content，减少传输量）
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageSummary {
+    pub id: i64,
+    pub title: String,
+    pub repo_name: Option<String>,
+    pub commit_range: Option<String>,
+    pub is_read: bool,
+    pub created_at: String,
+}
+```
+
+### 12.5 数据库操作
+
+```rust
+impl Database {
+    /// 为指定用户创建消息
+    pub fn create_message(&self, msg: &NewMessage) -> Result<i64> { ... }
+
+    /// 批量创建消息（一次审核 → 多个用户）
+    pub fn create_messages_for_authors(
+        &self,
+        authors: &[CommitAuthor],
+        task: &Task,
+        report: &JobOutput,
+    ) -> Result<usize> { ... }
+
+    /// 查询用户消息列表（分页 + 可选筛选未读）
+    pub fn list_messages(
+        &self,
+        user_id: i64,
+        unread_only: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MessageSummary>> { ... }
+
+    /// 获取消息详情（含全文内容）
+    pub fn get_message(&self, message_id: i64, user_id: i64) -> Result<Option<Message>> { ... }
+
+    /// 标记消息已读
+    pub fn mark_message_read(&self, message_id: i64, user_id: i64) -> Result<()> { ... }
+
+    /// 批量标记已读
+    pub fn mark_all_read(&self, user_id: i64) -> Result<usize> { ... }
+
+    /// 统计未读消息数
+    pub fn unread_count(&self, user_id: i64) -> Result<usize> { ... }
+}
+```
+
+---
+
+## 十三、REST API 设计
+
+### 13.1 概述
+
+在现有 axum 服务基础上新增 REST API 路由组，提供用户认证和消息查询能力。API 与 MCP 服务共用同一 axum 实例和端口（`:3100`），通过路径前缀 `/api` 区分。
+
+### 13.2 认证方式：JWT
+
+- 登录成功后返回 JWT token（HS256 签名）
+- 后续请求通过 `Authorization: Bearer <token>` 头携带
+- Token 有效期 7 天，Payload 包含 `user_id`、`email`、`exp`
+- 签名密钥通过 `config.toml` 的 `[web]` 段配置
+
+#### JWT Payload
+
+```json
+{
+  "sub": 1,
+  "email": "dev@example.com",
+  "exp": 1742000000
+}
+```
+
+### 13.3 配置扩展
+
+```toml
+[web]
+jwt_secret = "your-256-bit-secret"       # JWT 签名密钥
+token_expire_hours = 168                  # Token 有效期（小时），默认 7 天
+static_dir = "web/dist"                  # Vue3 构建产物目录
+```
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebConfig {
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
+    #[serde(default = "default_token_expire_hours")]
+    pub token_expire_hours: u64,
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
+}
+```
+
+### 13.4 API 接口清单
+
+#### 公开接口（无需认证）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/auth/login` | 邮箱 + 密码登录，返回 JWT |
+| POST | `/api/auth/activate` | 首次设置密码（激活账号） |
+
+#### 受保护接口（需 JWT）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/me` | 获取当前用户信息 |
+| GET | `/api/messages` | 消息列表（支持分页、筛选未读） |
+| GET | `/api/messages/:id` | 消息详情（返回全文，自动标记已读） |
+| PUT | `/api/messages/:id/read` | 标记单条消息已读 |
+| PUT | `/api/messages/read-all` | 标记全部已读 |
+| GET | `/api/messages/unread-count` | 未读消息数量 |
+
+### 13.5 接口详细定义
+
+#### POST `/api/auth/login`
+
+```json
+// Request
+{
+  "email": "dev@example.com",
+  "password": "my-password"
+}
+
+// Response 200
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": 1,
+    "email": "dev@example.com",
+    "display_name": "张三",
+    "avatar_url": "https://gravatar.com/..."
+  }
+}
+
+// Response 401
+{
+  "error": "invalid credentials"
+}
+```
+
+#### POST `/api/auth/activate`
+
+```json
+// Request
+{
+  "email": "dev@example.com",
+  "password": "new-password"
+}
+
+// Response 200
+{
+  "token": "eyJ...",
+  "user": { ... }
+}
+
+// Response 400
+{
+  "error": "account already activated"
+}
+
+// Response 404
+{
+  "error": "user not found"
+}
+```
+
+#### GET `/api/messages?unread=true&page=1&page_size=20`
+
+```json
+// Response 200
+{
+  "total": 42,
+  "unread_count": 5,
+  "page": 1,
+  "page_size": 20,
+  "items": [
+    {
+      "id": 101,
+      "title": "my-project 代码审查报告 2026-03-13",
+      "repo_name": "my-project",
+      "commit_range": "abc123..def456",
+      "is_read": false,
+      "created_at": "2026-03-13T09:00:00Z"
+    }
+  ]
+}
+```
+
+#### GET `/api/messages/:id`
+
+```json
+// Response 200
+{
+  "id": 101,
+  "title": "my-project 代码审查报告 2026-03-13",
+  "repo_name": "my-project",
+  "content": "# Git Review\n\n- Repository: my-project\n...(完整审核报告)...",
+  "report_path": "check/my-project/2026-03-13-review.md",
+  "commit_range": "abc123..def456",
+  "is_read": true,
+  "created_at": "2026-03-13T09:00:00Z"
+}
+```
+
+### 13.6 JWT 中间件（axum）
+
+```rust
+use axum::{
+    extract::FromRequestParts,
+    http::request::Parts,
+    http::StatusCode,
+};
+
+pub struct AuthUser {
+    pub user_id: i64,
+    pub email: String,
+}
+
+#[async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // 从 Authorization header 提取 Bearer token
+        // 验证 JWT 签名和过期时间
+        // 返回 AuthUser { user_id, email }
+    }
+}
+```
+
+### 13.7 路由挂载
+
+```rust
+// mcp/mod.rs 中扩展 Router
+pub async fn serve(config: Arc<AppConfig>, database: Database) -> Result<()> {
+    let state = AppState { config, database };
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/mcp", post(handle_mcp))
+        // ── 新增 REST API ──
+        .nest("/api", web::api_router())
+        // ── 静态文件托管（Vue3 SPA）──
+        .fallback_service(ServeDir::new(&state.config.web.static_dir))
+        .with_state(state);
+    // ...
+}
+```
+
+### 13.8 新增 Rust 依赖
+
+| crate | 版本 | 用途 |
+|-------|------|------|
+| `jsonwebtoken` | 9.x | JWT 编码/解码 |
+| `bcrypt` | 0.16 | 密码哈希 |
+| `tower-http` | 0.6 | `ServeDir` 静态文件服务、CORS |
+
+---
+
+## 十四、Vue3 前端设计
+
+### 14.1 概述
+
+前端采用 Vue3 + TypeScript + Vite 构建，遵循 **Figma 设计风格**（简洁留白、圆角卡片、柔和阴影、层次化排版）。构建产物输出到 `web/dist/`，由 axum `ServeDir` 托管。
+
+### 14.2 技术选型
+
+| 组件 | 选型 | 理由 |
+|------|------|------|
+| 框架 | Vue 3 (Composition API) | 轻量、响应式 |
+| 构建 | Vite | 快速 HMR，开箱即用 TS 支持 |
+| 路由 | Vue Router 4 | SPA 路由 |
+| 状态 | Pinia | 轻量状态管理 |
+| HTTP | fetch / ofetch | 轻量，无需引入 axios |
+| 样式 | Tailwind CSS | 原子化 CSS，快速还原 Figma 设计 |
+| 图标 | Lucide Icons | 简洁线性图标，匹配 Figma 风格 |
+| Markdown | markdown-it | 渲染审核报告正文 |
+
+### 14.3 前端项目结构
+
+```
+web/
+├── index.html
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+├── tailwind.config.ts
+├── src/
+│   ├── main.ts                  # 入口
+│   ├── App.vue                  # 根组件
+│   ├── router/
+│   │   └── index.ts             # 路由配置
+│   ├── stores/
+│   │   ├── auth.ts              # 用户认证状态
+│   │   └── messages.ts          # 消息列表状态
+│   ├── api/
+│   │   ├── client.ts            # HTTP 封装（附带 JWT header）
+│   │   ├── auth.ts              # 登录/激活接口
+│   │   └── messages.ts          # 消息接口
+│   ├── views/
+│   │   ├── LoginView.vue        # 登录页
+│   │   ├── ActivateView.vue     # 账号激活页（首次设置密码）
+│   │   └── MessagesView.vue     # 消息列表 + 详情页
+│   ├── components/
+│   │   ├── AppHeader.vue        # 顶部导航栏
+│   │   ├── MessageCard.vue      # 消息卡片组件
+│   │   ├── MessageDetail.vue    # 消息详情（Markdown 渲染）
+│   │   ├── EmptyState.vue       # 空状态占位
+│   │   └── UnreadBadge.vue      # 未读角标
+│   └── styles/
+│       └── globals.css          # Tailwind 基础 + 自定义设计 token
+├── public/
+│   └── favicon.svg
+└── dist/                        # 构建输出（.gitignore）
+```
+
+### 14.4 路由设计
+
+| 路径 | 组件 | 说明 | 认证 |
+|------|------|------|------|
+| `/login` | LoginView | 邮箱 + 密码登录 | 否 |
+| `/activate` | ActivateView | 首次激活（设置密码） | 否 |
+| `/messages` | MessagesView | 消息列表（默认页） | 是 |
+| `/messages/:id` | MessagesView (detail) | 消息详情 | 是 |
+
+### 14.5 页面设计（Figma 风格）
+
+#### 设计系统 Token
+
+```
+颜色：
+  - Primary:     #6C5CE7  (紫色主色)
+  - Background:  #FAFBFC  (浅灰底)
+  - Surface:     #FFFFFF  (卡片白)
+  - Text:        #2D3436  (深灰文字)
+  - Text-muted:  #636E72  (次要文字)
+  - Success:     #00B894  (成功绿)
+  - Error:       #E17055  (错误红)
+  - Unread-dot:  #6C5CE7  (未读圆点)
+  - Border:      #E9ECEF  (分割线)
+
+圆角：
+  - Card:        12px
+  - Button:      8px
+  - Input:       8px
+  - Avatar:      50% (圆形)
+
+阴影：
+  - Card:        0 1px 3px rgba(0,0,0,0.08)
+  - Card-hover:  0 4px 12px rgba(0,0,0,0.12)
+  - Modal:       0 8px 30px rgba(0,0,0,0.15)
+
+间距：
+  - Page padding: 32px
+  - Card padding: 24px
+  - 元素间距: 16px (默认) / 8px (紧凑)
+```
+
+#### 登录页（LoginView）
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│                    ┌─────────────────────────────┐                   │
+│                    │                             │                   │
+│                    │        🔧 git-helper        │                   │
+│                    │                             │                   │
+│                    │   ┌───────────────────────┐ │                   │
+│                    │   │ 📧  邮箱地址           │ │                   │
+│                    │   └───────────────────────┘ │                   │
+│                    │                             │                   │
+│                    │   ┌───────────────────────┐ │                   │
+│                    │   │ 🔒  密码              │ │                   │
+│                    │   └───────────────────────┘ │                   │
+│                    │                             │                   │
+│                    │   ┌───────────────────────┐ │                   │
+│                    │   │      登  录           │ │                   │
+│                    │   └───────────────────────┘ │                   │
+│                    │                             │                   │
+│                    │   首次使用？激活账号 →       │                   │
+│                    │                             │                   │
+│                    └─────────────────────────────┘                   │
+│                                                                      │
+│  背景: #FAFBFC     卡片: 白色, 圆角 12px, 阴影                        │
+│  按钮: Primary #6C5CE7, 白色文字, 圆角 8px                            │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**设计要点**：
+- 居中卡片布局，宽度 400px
+- 卡片内 24px 内边距，元素间 16px 间距
+- 输入框左侧带图标，placeholder 为灰色
+- 主按钮全宽，Primary 色，hover 加深
+- 底部「激活账号」为文字链接
+
+#### 消息列表页（MessagesView）
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  🔧 git-helper         消息中心         张三 ▾   🔔 5         │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌─────────────────────────────────────────┐  ┌────────────────────┐│
+│  │                                         │  │                    ││
+│  │  🔘  全部 (42)    📩 未读 (5)           │  │  (消息详情区域)     ││
+│  │                                         │  │                    ││
+│  │  ┌───────────────────────────────────┐  │  │  选中一条消息后     ││
+│  │  │ ● my-project 代码审查报告         │  │  │  显示完整报告内容   ││
+│  │  │   2026-03-13 · abc12..def45      │  │  │                    ││
+│  │  │   检测到 3 个潜在问题             │  │  │  ┌──────────────┐  ││
+│  │  └───────────────────────────────────┘  │  │  │  # Git Review │  ││
+│  │                                         │  │  │              │  ││
+│  │  ┌───────────────────────────────────┐  │  │  │  Repository: │  ││
+│  │  │   my-service 代码审查报告         │  │  │  │  my-project  │  ││
+│  │  │   2026-03-12 · 123ab..789cd      │  │  │  │              │  ││
+│  │  │   代码质量良好，无重大问题         │  │  │  │  Commit:     │  ││
+│  │  └───────────────────────────────────┘  │  │  │  abc12..def45│  ││
+│  │                                         │  │  │              │  ││
+│  │  ┌───────────────────────────────────┐  │  │  │  ## 问题列表  │  ││
+│  │  │   api-gateway 代码审查报告        │  │  │  │  1. ...      │  ││
+│  │  │   2026-03-11 · aaa11..bbb22      │  │  │  │  2. ...      │  ││
+│  │  │   发现 1 个安全风险               │  │  │  │              │  ││
+│  │  └───────────────────────────────────┘  │  │  │  ## 建议      │  ││
+│  │                                         │  │  │  ...         │  ││
+│  │  ◄ 1  2  3 ►                           │  │  └──────────────┘  ││
+│  │                                         │  │                    ││
+│  └─────────────────────────────────────────┘  └────────────────────┘│
+│                                                                      │
+│  左栏: 360px, 消息卡片列表                                            │
+│  右栏: flex-1, Markdown 渲染区                                        │
+│  卡片: 白色底, 圆角 12px, hover 阴影加深                               │
+│  未读标识: 左侧紫色圆点 ●                                              │
+│  已读卡片: 文字颜色变浅                                                │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**设计要点**：
+- 顶部导航栏：左侧 Logo + 标题，右侧用户头像下拉 + 未读角标
+- 主体区域为左右分栏（master-detail 布局）
+- 左栏消息卡片列表：
+  - 未读消息左侧显示紫色圆点 `●`
+  - 卡片包含：标题、日期、commit 范围（缩略）、摘要首行
+  - 选中卡片高亮（左边框 3px Primary 色）
+  - 底部分页器
+- 右栏消息详情：
+  - 标题 + 元信息（仓库名、commit 范围、审核时间）
+  - Markdown 渲染报告全文
+  - 顶部「标记已读」/「标记全部已读」操作按钮
+- 响应式：移动端左右分栏改为全屏列表 → 点击进入详情
+
+### 14.6 Vite 构建配置
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  build: {
+    outDir: 'dist',
+  },
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3100',
+      '/mcp': 'http://127.0.0.1:3100',
+    },
+  },
+})
+```
+
+### 14.7 API 客户端封装
+
+```typescript
+// src/api/client.ts
+const BASE_URL = ''
+
+export async function request<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const token = localStorage.getItem('token')
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((options.headers as Record<string, string>) || {}),
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers,
+  })
+
+  if (res.status === 401) {
+    localStorage.removeItem('token')
+    window.location.href = '/login'
+    throw new Error('Unauthorized')
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.error || `HTTP ${res.status}`)
+  }
+
+  return res.json()
+}
+```
+
+### 14.8 认证状态管理（Pinia）
+
+```typescript
+// src/stores/auth.ts
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+export const useAuthStore = defineStore('auth', () => {
+  const token = ref(localStorage.getItem('token') || '')
+  const user = ref<User | null>(null)
+
+  const isAuthenticated = computed(() => !!token.value)
+
+  function setAuth(t: string, u: User) {
+    token.value = t
+    user.value = u
+    localStorage.setItem('token', t)
+  }
+
+  function logout() {
+    token.value = ''
+    user.value = null
+    localStorage.removeItem('token')
+  }
+
+  return { token, user, isAuthenticated, setAuth, logout }
+})
+```
+
+### 14.9 构建集成
+
+前端构建产物由 Rust 后端托管，开发和部署流程：
+
+```bash
+# 开发模式（前端 HMR + 代理后端 API）
+cd web && npm run dev
+
+# 生产构建
+cd web && npm run build    # 输出到 web/dist/
+
+# 启动后端（自动托管 web/dist/）
+cargo run
+```
+
+axum 静态文件托管：
+
+```rust
+use tower_http::services::ServeDir;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .route("/mcp", post(handle_mcp))
+    .nest("/api", web::api_router())
+    .fallback_service(
+        ServeDir::new(&config.web.static_dir)
+            .append_index_html_on_directories(true)
+    );
+```
+
+SPA 路由需要 fallback 到 `index.html`，确保 Vue Router 的 history 模式正常工作。
+
+### 14.10 目录结构更新
+
+```
+git-helper/
+├── src/
+│   ├── web/                    # 新增：Web API 模块
+│   │   ├── mod.rs              # 路由注册
+│   │   ├── auth.rs             # 登录/激活接口
+│   │   ├── messages.rs         # 消息查询接口
+│   │   └── middleware.rs       # JWT 验证中间件
+│   └── ...（现有模块不变）
+├── web/                        # 新增：Vue3 前端项目
+│   ├── src/
+│   │   ├── views/
+│   │   ├── components/
+│   │   ├── stores/
+│   │   └── api/
+│   └── dist/                   # 构建产物
+└── ...
+```
+
+### 14.11 开发里程碑扩展
+
+| 阶段 | 内容 | 验收标准 |
+|------|------|---------|
+| M7 | 用户管理 + 消息表 + CommitEntry 扩展 | git_review 完成后 users/messages 表自动填充 |
+| M8 | REST API（登录 + 消息接口） | curl 调用登录获取 token，查询消息列表正常 |
+| M9 | Vue3 前端页面 | 登录 → 查看消息列表 → 查看报告详情 全流程通过 |
+| M10 | 集成联调 + 样式完善 | Figma 风格还原度达标，移动端响应式正常 |

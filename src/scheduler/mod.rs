@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::db::models::{Task, TaskStatus, TaskType};
+use crate::db::models::{NewMessage, Task, TaskStatus, TaskType};
 use crate::executor::codex::CodexExecutor;
 use crate::jobs::{self, JobOutput};
 use crate::notifier::{Notification, NotifierDispatcher};
@@ -68,9 +68,11 @@ impl Dispatcher {
                 let output = self.executor.execute(&task.prompt, None).await?;
                 Ok(JobOutput {
                     task_result: output.clone(),
+                    content: output.clone(),
                     summary: output,
                     repo_name: None,
                     report_path: None,
+                    commit_range: None,
                 })
             }
             TaskType::GitReview => {
@@ -99,6 +101,7 @@ impl Dispatcher {
             Ok(output) => {
                 self.database
                     .finish_task(task, TaskStatus::Done, Some(&output.task_result))?;
+                self.persist_message(task, &output)?;
                 info!(task_id = task.id, "task completed");
                 self.notify(
                     task,
@@ -118,6 +121,28 @@ impl Dispatcher {
                     .await;
             }
         }
+        Ok(())
+    }
+
+    fn persist_message(&self, task: &Task, output: &JobOutput) -> Result<()> {
+        let users = self.database.list_users()?;
+        if users.is_empty() {
+            return Ok(());
+        }
+
+        let title = build_message_title(task, output);
+        for user in users {
+            self.database.insert_message(&NewMessage {
+                user_id: user.id,
+                title: title.clone(),
+                repo_name: output.repo_name.clone(),
+                content: output.content.clone(),
+                summary: truncate_chars(&output.summary, 500).to_string(),
+                report_path: output.report_path.clone(),
+                commit_range: output.commit_range.clone(),
+            })?;
+        }
+
         Ok(())
     }
 
@@ -180,5 +205,15 @@ fn truncate_chars(input: &str, max_chars: usize) -> &str {
     match input.char_indices().nth(max_chars) {
         Some((idx, _)) => &input[..idx],
         None => input,
+    }
+}
+
+fn build_message_title(task: &Task, output: &JobOutput) -> String {
+    match (&output.repo_name, &output.commit_range) {
+        (Some(repo_name), Some(commit_range)) => {
+            format!("{repo_name} {} {}", task.task_type.as_str(), commit_range)
+        }
+        (Some(repo_name), None) => format!("{repo_name} {}", task.task_type.as_str()),
+        _ => task.name.clone(),
     }
 }

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use git_helper::config::AppConfig;
 use git_helper::db::Database;
-use git_helper::db::models::{NewGitRepo, NewTask, TaskType};
+use git_helper::db::models::{NewGitRepo, NewTask, NewUser, TaskType};
 use git_helper::scheduler::{AppContext, Dispatcher};
 use tokio::signal;
 use tracing::info;
@@ -51,6 +51,13 @@ enum Command {
     },
     ListRepos,
     ListTasks,
+    AddUser {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        display_name: String,
+    },
+    ListUsers,
 }
 
 #[tokio::main]
@@ -126,6 +133,25 @@ async fn main() -> Result<()> {
                     task.task_type.as_str(),
                     task.status.as_str()
                 );
+            }
+            Ok(())
+        }
+        Command::AddUser {
+            email,
+            display_name,
+        } => {
+            let id = database.insert_user(&NewUser {
+                email,
+                display_name,
+                password_hash: None,
+                avatar_url: None,
+            })?;
+            info!(user_id = id, "user added");
+            Ok(())
+        }
+        Command::ListUsers => {
+            for user in database.list_users()? {
+                println!("{}\t{}\t{}", user.id, user.email, user.display_name);
             }
             Ok(())
         }

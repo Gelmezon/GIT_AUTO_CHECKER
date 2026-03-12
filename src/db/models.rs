@@ -70,6 +70,53 @@ pub struct GitRepo {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewUser {
+    pub email: String,
+    pub display_name: String,
+    pub password_hash: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct User {
+    pub id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub password_hash: Option<String>,
+    pub avatar_url: Option<String>,
+    pub activated_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMessage {
+    pub user_id: i64,
+    pub title: String,
+    pub repo_name: Option<String>,
+    pub content: String,
+    pub summary: String,
+    pub report_path: Option<String>,
+    pub commit_range: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub id: i64,
+    pub user_id: i64,
+    pub title: String,
+    pub repo_name: Option<String>,
+    pub content: String,
+    pub summary: String,
+    pub report_path: Option<String>,
+    pub commit_range: Option<String>,
+    pub is_read: bool,
+    pub read_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl TaskType {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -164,6 +211,52 @@ impl GitRepo {
             created_at: decode_datetime(row.get_ref(8)?.as_str().map_err(to_sql_err)?)
                 .map_err(to_sql_err)?,
             updated_at: decode_datetime(row.get_ref(9)?.as_str().map_err(to_sql_err)?)
+                .map_err(to_sql_err)?,
+        })
+    }
+}
+
+impl User {
+    pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            display_name: row.get(2)?,
+            password_hash: row.get(3)?,
+            avatar_url: row.get(4)?,
+            activated_at: row
+                .get::<_, Option<String>>(5)?
+                .map(|value| decode_datetime(&value))
+                .transpose()
+                .map_err(to_sql_err)?,
+            created_at: decode_datetime(row.get_ref(6)?.as_str().map_err(to_sql_err)?)
+                .map_err(to_sql_err)?,
+            updated_at: decode_datetime(row.get_ref(7)?.as_str().map_err(to_sql_err)?)
+                .map_err(to_sql_err)?,
+        })
+    }
+}
+
+impl Message {
+    pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            title: row.get(2)?,
+            repo_name: row.get(3)?,
+            content: row.get(4)?,
+            summary: row.get(5)?,
+            report_path: row.get(6)?,
+            commit_range: row.get(7)?,
+            is_read: row.get::<_, i64>(8)? != 0,
+            read_at: row
+                .get::<_, Option<String>>(9)?
+                .map(|value| decode_datetime(&value))
+                .transpose()
+                .map_err(to_sql_err)?,
+            created_at: decode_datetime(row.get_ref(10)?.as_str().map_err(to_sql_err)?)
+                .map_err(to_sql_err)?,
+            updated_at: decode_datetime(row.get_ref(11)?.as_str().map_err(to_sql_err)?)
                 .map_err(to_sql_err)?,
         })
     }

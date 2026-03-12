@@ -23,6 +23,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub notifier: NotifierConfig,
     #[serde(default)]
+    pub web: WebConfig,
+    #[serde(default)]
     pub log: LogConfig,
 }
 
@@ -102,6 +104,16 @@ pub struct LogConfig {
     pub file: PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebConfig {
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
+    #[serde(default = "default_token_expire_hours")]
+    pub token_expire_hours: u64,
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -111,6 +123,7 @@ impl Default for AppConfig {
             database: DatabaseConfig::default(),
             runtime: RuntimeConfig::default(),
             notifier: NotifierConfig::default(),
+            web: WebConfig::default(),
             log: LogConfig::default(),
         }
     }
@@ -170,6 +183,16 @@ impl Default for LogConfig {
         Self {
             level: default_log_level(),
             file: default_log_file(),
+        }
+    }
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            jwt_secret: default_jwt_secret(),
+            token_expire_hours: default_token_expire_hours(),
+            static_dir: default_static_dir(),
         }
     }
 }
@@ -302,4 +325,16 @@ fn default_log_file() -> PathBuf {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_jwt_secret() -> String {
+    "change-me-before-production".to_string()
+}
+
+fn default_token_expire_hours() -> u64 {
+    168
+}
+
+fn default_static_dir() -> PathBuf {
+    PathBuf::from("web/dist")
 }

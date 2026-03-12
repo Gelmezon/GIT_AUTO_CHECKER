@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::get, routing::post};
 use serde_json::json;
+use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::config::AppConfig;
@@ -19,19 +20,17 @@ use crate::mcp::tools::git::{
     GitCloneArgs, GitDiffArgs, GitLogArgs, GitPullArgs, GitStatusArgs, diff_repo, git_clone,
     git_log, git_pull, git_status,
 };
-
-#[derive(Clone)]
-struct McpState {
-    config: Arc<AppConfig>,
-    #[allow(dead_code)]
-    database: Database,
-}
+use crate::web::AppState;
 
 pub async fn serve(config: Arc<AppConfig>, database: Database) -> Result<()> {
-    let state = McpState { config, database };
+    let state = AppState { config, database };
     let app = Router::new()
         .route("/health", get(health))
         .route("/mcp", post(handle_mcp))
+        .nest("/api", crate::web::api_router())
+        .fallback_service(
+            ServeDir::new(&state.config.web.static_dir).append_index_html_on_directories(true),
+        )
         .with_state(state.clone());
 
     let address: SocketAddr = format!("{}:{}", state.config.mcp.host, state.config.mcp.port)
@@ -52,7 +51,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn handle_mcp(
-    State(_state): State<McpState>,
+    State(_state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = request.id.clone();

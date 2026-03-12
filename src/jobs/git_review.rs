@@ -34,9 +34,11 @@ pub async fn execute(
         database.update_repo_last_commit(repo.id, Some(&review_range.head))?;
         return Ok(JobOutput {
             task_result: "no new commits to review".to_string(),
+            content: "no new commits to review".to_string(),
             summary: "no new commits to review".to_string(),
             repo_name: Some(repo.name.clone()),
             report_path: None,
+            commit_range: None,
         });
     }
 
@@ -51,9 +53,11 @@ pub async fn execute(
         database.update_repo_last_commit(repo.id, Some(&review_range.head))?;
         return Ok(JobOutput {
             task_result: "diff is empty".to_string(),
+            content: "diff is empty".to_string(),
             summary: "diff is empty".to_string(),
             repo_name: Some(repo.name.clone()),
             report_path: None,
+            commit_range: Some(format!("{}..{}", review_range.from, review_range.head)),
         });
     }
 
@@ -80,9 +84,11 @@ pub async fn execute(
 
     Ok(JobOutput {
         task_result: report_path.to_string_lossy().to_string(),
+        content: review.clone(),
         summary: review,
         repo_name: Some(repo.name),
         report_path: Some(report_path.to_string_lossy().to_string()),
+        commit_range: Some(format!("{}..{}", review_range.from, review_range.head)),
     })
 }
 

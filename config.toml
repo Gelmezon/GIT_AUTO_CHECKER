@@ -26,6 +26,11 @@ tests_generated_dir = "tests-generated"
 level = "info"
 file = "logs/git-helper.log"
 
+[web]
+jwt_secret = "change-me-before-production"
+token_expire_hours = 168
+static_dir = "web/dist"
+
 # [[notifier.channels]]
 # name = "dev-team-wecom"
 # kind = "wecom"

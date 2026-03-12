@@ -36,9 +36,11 @@ pub async fn execute(
         database.update_repo_last_commit(repo.id, Some(&review_range.head))?;
         return Ok(JobOutput {
             task_result: "no new commits to generate tests".to_string(),
+            content: "no new commits to generate tests".to_string(),
             summary: "no new commits to generate tests".to_string(),
             repo_name: Some(repo.name.clone()),
             report_path: None,
+            commit_range: None,
         });
     }
 
@@ -53,9 +55,11 @@ pub async fn execute(
         database.update_repo_last_commit(repo.id, Some(&review_range.head))?;
         return Ok(JobOutput {
             task_result: "diff is empty".to_string(),
+            content: "diff is empty".to_string(),
             summary: "diff is empty".to_string(),
             repo_name: Some(repo.name.clone()),
             report_path: None,
+            commit_range: Some(format!("{}..{}", review_range.from, review_range.head)),
         });
     }
 
@@ -78,9 +82,11 @@ pub async fn execute(
 
     Ok(JobOutput {
         task_result: output_dir.to_string_lossy().to_string(),
+        content: generated,
         summary: write_result.summary,
         repo_name: Some(repo.name),
         report_path: Some(write_result.summary_path.to_string_lossy().to_string()),
+        commit_range: Some(format!("{}..{}", review_range.from, review_range.head)),
     })
 }
 
@@ -195,7 +201,10 @@ fn detect_test_dir(repo_path: &Path) -> Option<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if ["tests", "test", "__tests__"].iter().any(|candidate| *candidate == name) {
+                if ["tests", "test", "__tests__"]
+                    .iter()
+                    .any(|candidate| *candidate == name)
+                {
                     return Some(path);
                 }
                 if let Some(found) = find_test_dir_recursive(&path, depth + 1, max_depth) {

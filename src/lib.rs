@@ -6,3 +6,4 @@ pub mod jobs;
 pub mod mcp;
 pub mod notifier;
 pub mod scheduler;
+pub mod web;
