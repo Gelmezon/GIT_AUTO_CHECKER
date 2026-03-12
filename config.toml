@@ -1,0 +1,26 @@
+[scheduler]
+interval_secs = 1
+task_timeout_secs = 300
+max_concurrency = 4
+claim_batch_size = 16
+
+[codex]
+api_key = ""
+model = "gpt-5.4"
+max_retries = 2
+timeout_secs = 300
+response_url = "https://api.openai.com/v1/responses"
+
+[mcp]
+host = "127.0.0.1"
+port = 3100
+
+[database]
+path = "data/scheduler.db"
+
+[runtime]
+check_dir = "check"
+
+[log]
+level = "info"
+file = "logs/git-helper.log"

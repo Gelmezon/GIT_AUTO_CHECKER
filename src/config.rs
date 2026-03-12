@@ -1,0 +1,269 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub codex: CodexConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_task_timeout_secs")]
+    pub task_timeout_secs: u64,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_claim_batch_size")]
+    pub claim_batch_size: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CodexConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+    #[serde(default = "default_task_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_response_url")]
+    pub response_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_database_path")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_check_dir")]
+    pub check_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default = "default_log_file")]
+    pub file: PathBuf,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            scheduler: SchedulerConfig::default(),
+            codex: CodexConfig::default(),
+            mcp: McpConfig::default(),
+            database: DatabaseConfig::default(),
+            runtime: RuntimeConfig::default(),
+            log: LogConfig::default(),
+        }
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_interval_secs(),
+            task_timeout_secs: default_task_timeout_secs(),
+            max_concurrency: default_max_concurrency(),
+            claim_batch_size: default_claim_batch_size(),
+        }
+    }
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            model: default_model(),
+            max_retries: default_max_retries(),
+            timeout_secs: default_task_timeout_secs(),
+            response_url: default_response_url(),
+        }
+    }
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+        }
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: default_database_path(),
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            check_dir: default_check_dir(),
+        }
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            file: default_log_file(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let mut config = if path.exists() {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("failed to read config file {}", path.display()))?;
+            toml::from_str::<AppConfig>(&content)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?
+        } else {
+            AppConfig::default()
+        };
+
+        if let Ok(api_key) = env::var("OPENAI_API_KEY") {
+            config.codex.api_key = api_key;
+        }
+
+        Ok(config)
+    }
+
+    pub fn init_logging(&self) -> Result<WorkerGuard> {
+        if let Some(parent) = self.log.file.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let file_appender = tracing_appender::rolling::never(
+            self.log
+                .file
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            self.log
+                .file
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("git-helper.log"),
+        );
+        let (writer, guard) = tracing_appender::non_blocking(file_appender);
+        let filter =
+            EnvFilter::try_new(self.log.level.clone()).unwrap_or_else(|_| EnvFilter::new("info"));
+
+        let subscriber = Registry::default()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer),
+            );
+
+        tracing::subscriber::set_global_default(subscriber)
+            .context("failed to initialize tracing subscriber")?;
+
+        Ok(guard)
+    }
+
+    pub fn scheduler_interval(&self) -> Duration {
+        Duration::from_secs(self.scheduler.interval_secs)
+    }
+
+    pub fn task_timeout(&self) -> Duration {
+        Duration::from_secs(self.scheduler.task_timeout_secs)
+    }
+
+    pub fn mcp_base_url(&self) -> String {
+        format!("http://{}:{}", self.mcp.host, self.mcp.port)
+    }
+}
+
+fn default_interval_secs() -> u64 {
+    1
+}
+
+fn default_task_timeout_secs() -> u64 {
+    300
+}
+
+fn default_max_concurrency() -> usize {
+    4
+}
+
+fn default_claim_batch_size() -> usize {
+    16
+}
+
+fn default_model() -> String {
+    "gpt-5.4".to_string()
+}
+
+fn default_max_retries() -> usize {
+    2
+}
+
+fn default_response_url() -> String {
+    "https://api.openai.com/v1/responses".to_string()
+}
+
+fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_port() -> u16 {
+    3100
+}
+
+fn default_database_path() -> PathBuf {
+    PathBuf::from("data/scheduler.db")
+}
+
+fn default_check_dir() -> PathBuf {
+    PathBuf::from("check")
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_file() -> PathBuf {
+    PathBuf::from("logs/git-helper.log")
+}
