@@ -8,6 +8,7 @@ use crate::db::{decode_datetime, next_run_from_cron};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskType {
     GitReview,
+    TestGen,
     Custom,
 }
 
@@ -73,6 +74,7 @@ impl TaskType {
     pub fn as_str(self) -> &'static str {
         match self {
             TaskType::GitReview => "git_review",
+            TaskType::TestGen => "test_gen",
             TaskType::Custom => "custom",
         }
     }
@@ -84,6 +86,7 @@ impl TaskType {
     pub fn from_db(input: &str) -> Result<Self> {
         match input {
             "git_review" => Ok(Self::GitReview),
+            "test_gen" => Ok(Self::TestGen),
             "custom" => Ok(Self::Custom),
             other => Err(anyhow!("unsupported task type: {other}")),
         }

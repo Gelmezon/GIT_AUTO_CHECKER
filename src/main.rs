@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
 
 async fn run(config: AppConfig, database: Database) -> Result<()> {
     let config = Arc::new(config);
-    let dispatcher = Dispatcher::new(config.clone(), database.clone());
+    let dispatcher = Dispatcher::new(config.clone(), database.clone())?;
     let scheduler_context = AppContext {
         config: config.clone(),
         database: database.clone(),

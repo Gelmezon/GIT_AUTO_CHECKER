@@ -21,6 +21,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub notifier: NotifierConfig,
+    #[serde(default)]
     pub log: LogConfig,
 }
 
@@ -40,14 +42,14 @@ pub struct SchedulerConfig {
 pub struct CodexConfig {
     #[serde(default)]
     pub api_key: String,
+    #[serde(default = "default_codex_command")]
+    pub command: String,
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default = "default_max_retries")]
     pub max_retries: usize,
     #[serde(default = "default_task_timeout_secs")]
     pub timeout_secs: u64,
-    #[serde(default = "default_response_url")]
-    pub response_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +70,28 @@ pub struct DatabaseConfig {
 pub struct RuntimeConfig {
     #[serde(default = "default_check_dir")]
     pub check_dir: PathBuf,
+    #[serde(default = "default_tests_generated_dir")]
+    pub tests_generated_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NotifierConfig {
+    #[serde(default)]
+    pub channels: Vec<ChannelConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelConfig {
+    pub name: String,
+    pub kind: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub webhook_url: Option<String>,
+    pub bot_token: Option<String>,
+    pub chat_id: Option<String>,
+    pub api_url: Option<String>,
+    pub access_token: Option<String>,
+    pub recipient: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,6 +110,7 @@ impl Default for AppConfig {
             mcp: McpConfig::default(),
             database: DatabaseConfig::default(),
             runtime: RuntimeConfig::default(),
+            notifier: NotifierConfig::default(),
             log: LogConfig::default(),
         }
     }
@@ -106,10 +131,10 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            command: default_codex_command(),
             model: default_model(),
             max_retries: default_max_retries(),
             timeout_secs: default_task_timeout_secs(),
-            response_url: default_response_url(),
         }
     }
 }
@@ -135,6 +160,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             check_dir: default_check_dir(),
+            tests_generated_dir: default_tests_generated_dir(),
         }
     }
 }
@@ -159,7 +185,9 @@ impl AppConfig {
             AppConfig::default()
         };
 
-        if let Ok(api_key) = env::var("OPENAI_API_KEY") {
+        if let Ok(api_key) = env::var("CODEX_API_KEY") {
+            config.codex.api_key = api_key;
+        } else if let Ok(api_key) = env::var("OPENAI_API_KEY") {
             config.codex.api_key = api_key;
         }
 
@@ -236,12 +264,12 @@ fn default_model() -> String {
     "gpt-5.4".to_string()
 }
 
-fn default_max_retries() -> usize {
-    2
+fn default_codex_command() -> String {
+    "codex".to_string()
 }
 
-fn default_response_url() -> String {
-    "https://api.openai.com/v1/responses".to_string()
+fn default_max_retries() -> usize {
+    2
 }
 
 fn default_host() -> String {
@@ -260,10 +288,18 @@ fn default_check_dir() -> PathBuf {
     PathBuf::from("check")
 }
 
+fn default_tests_generated_dir() -> PathBuf {
+    PathBuf::from("tests-generated")
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
 
 fn default_log_file() -> PathBuf {
     PathBuf::from("logs/git-helper.log")
+}
+
+fn default_true() -> bool {
+    true
 }

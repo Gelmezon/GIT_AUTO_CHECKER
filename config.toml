@@ -6,10 +6,10 @@ claim_batch_size = 16
 
 [codex]
 api_key = ""
+command = "codex"
 model = "gpt-5.4"
 max_retries = 2
 timeout_secs = 300
-response_url = "https://api.openai.com/v1/responses"
 
 [mcp]
 host = "127.0.0.1"
@@ -20,7 +20,21 @@ path = "data/scheduler.db"
 
 [runtime]
 check_dir = "check"
+tests_generated_dir = "tests-generated"
 
 [log]
 level = "info"
 file = "logs/git-helper.log"
+
+# [[notifier.channels]]
+# name = "dev-team-wecom"
+# kind = "wecom"
+# enabled = true
+# webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+
+# [[notifier.channels]]
+# name = "dev-team-telegram"
+# kind = "telegram"
+# enabled = false
+# bot_token = "123456:ABC-DEF"
+# chat_id = "-1001234567890"

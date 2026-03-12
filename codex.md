@@ -8,7 +8,8 @@
 2. **Prompt 数据库** — 持久化存储待执行的 AI Prompt、调度时间、执行状态等元数据。
 3. **Codex 执行器** — 扫描到到期任务后，调用 OpenAI Codex（模型 `gpt-5.4`）执行 Prompt。
 4. **Git 管理 MCP 服务** — 以 MCP（Model Context Protocol）协议暴露 Git 操作能力，在本机监听端口，供调度系统及其他 AI 工具调用。
-5. **首个业务功能：定时 Git 审核** — 定时拉取配置的 Git 项目，使用 Codex 进行代码审核，将审核报告输出到 `check/` 目录。
+5. **机器人通知** — 任务执行完成后，通过企业微信 / Telegram / WhatsApp 等渠道推送审核报告摘要和结果通知。
+6. **首个业务功能：定时 Git 审核** — 定时拉取配置的 Git 项目，使用 Codex 进行代码审核，将审核报告输出到 `check/` 目录，并通过机器人推送通知。
 
 ---
 
@@ -36,32 +37,34 @@
 ## 四、系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         git-helper 进程                             │
-│                                                                     │
-│  ┌─────────────┐   1s tick   ┌──────────────┐                      │
-│  │  Scheduler   │ ─────────▸ │  SQLite DB    │                      │
-│  │  (tokio)     │            │  tasks        │                      │
-│  └──────┬──────┘            │  git_repos    │                      │
-│         │                    └──────┬───────┘                      │
-│         │ spawn task                │                               │
-│         ▼                           ▼                               │
-│  ┌─────────────┐            ┌──────────────┐   ┌────────────────┐  │
-│  │  Dispatcher  │ ─────────▸│ Codex 执行器  │──▸│ check/ 报告    │  │
-│  │  (并发控制)  │            │ (gpt-5.4)    │   └────────────────┘  │
-│  └─────────────┘            └──────────────┘                       │
-│                                                                     │
-│  ┌──────────────────────────────────────┐                          │
-│  │  Git MCP Server (axum, :3100)        │                          │
-│  │  Tools: clone/pull/log/diff/status   │                          │
-│  └──────────────────────────────────────┘                          │
-└─────────────────────────────────────────────────────────────────────┘
-        ▲ HTTP/SSE
-        │
-   外部 AI 工具 / curl / MCP Inspector
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            git-helper 进程                                │
+│                                                                          │
+│  ┌─────────────┐   1s tick   ┌──────────────┐                           │
+│  │  Scheduler   │ ─────────▸ │  SQLite DB    │                           │
+│  │  (tokio)     │            │  tasks        │                           │
+│  └──────┬──────┘            │  git_repos    │                           │
+│         │                    │  bot_channels │                           │
+│         │ spawn task         └──────┬───────┘                           │
+│         ▼                           ▼                                    │
+│  ┌─────────────┐            ┌──────────────┐   ┌────────────────┐       │
+│  │  Dispatcher  │ ─────────▸│ Codex 执行器  │──▸│ check/ 报告    │       │
+│  │  (并发控制)  │            │ (gpt-5.4)    │   └───────┬────────┘       │
+│  └─────────────┘            └──────────────┘           │                │
+│                                                         ▼                │
+│  ┌──────────────────────────────────────┐   ┌──────────────────────┐    │
+│  │  Git MCP Server (axum, :3100)        │   │  Notifier (通知分发)  │    │
+│  │  Tools: clone/pull/log/diff/status   │   │  ├─ 企业微信 Webhook  │    │
+│  └──────────────────────────────────────┘   │  ├─ Telegram Bot API │    │
+│                                              │  └─ WhatsApp Cloud   │    │
+│                                              └──────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────┘
+        ▲ HTTP/SSE                                       │ HTTPS
+        │                                                ▼
+   外部 AI 工具 / curl / MCP Inspector          企业微信 / Telegram / WhatsApp
 ```
 
-**关键决策**：Scheduler、Dispatcher、MCP Server 运行在同一进程的不同 tokio task 中，共享数据库连接池。单进程部署简单，SQLite 通过 WAL 模式支持并发读。
+**关键决策**：Scheduler、Dispatcher、MCP Server、Notifier 运行在同一进程的不同 tokio task 中，共享数据库连接池。单进程部署简单，SQLite 通过 WAL 模式支持并发读。通知发送异步化，不阻塞任务主流程。
 
 ---
 
@@ -87,6 +90,29 @@ port = 3100
 [log]
 level = "info"                 # trace / debug / info / warn / error
 file = "logs/git-helper.log"
+
+# ── 机器人通知（可配置多个渠道，按需启用） ──
+
+[[notifier.channels]]
+name = "dev-team-wecom"
+kind = "wecom"                 # 企业微信
+enabled = true
+webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+
+[[notifier.channels]]
+name = "dev-team-telegram"
+kind = "telegram"
+enabled = false
+bot_token = "123456:ABC-DEF..."
+chat_id = "-1001234567890"     # 群组 ID（负数）或用户 ID
+
+[[notifier.channels]]
+name = "dev-team-whatsapp"
+kind = "whatsapp"
+enabled = false
+api_url = "https://graph.facebook.com/v21.0/PHONE_NUMBER_ID/messages"
+access_token = "EAAG..."
+recipient = "8613800138000"    # 接收方手机号（含国际区号）
 ```
 
 ### 5.2 定时器引擎（Scheduler）
@@ -410,6 +436,402 @@ check/
 - 安全风险提示
 - 改进建议
 
+### 5.7 机器人通知模块（Notifier）
+
+任务执行完成后，将审核报告摘要推送到企业微信 / Telegram / WhatsApp 等渠道。
+
+#### 设计原则
+
+- **异步非阻塞** — 通知发送在独立 tokio task 中执行，不阻塞任务主流程
+- **多渠道广播** — 同一事件可同时推送到多个已启用的渠道
+- **发送失败不影响任务状态** — 通知失败仅记录日志告警，不回退任务状态
+- **统一 trait 抽象** — 新增渠道只需实现 `Notifier` trait，无需修改调度逻辑
+
+#### 渠道对比
+
+| 渠道 | 协议 | 认证方式 | 消息格式 | 适合场景 |
+|------|------|---------|---------|---------|
+| 企业微信 | Webhook (HTTPS POST) | URL 中的 `key` 参数 | Markdown | 国内团队、无需申请 Bot |
+| Telegram | Bot API (HTTPS POST) | `bot_token` | Markdown / HTML | 海外团队、功能丰富 |
+| WhatsApp | Cloud API (HTTPS POST) | Bearer Token | 模板消息 / 文本 | 商务场景、触达客户 |
+
+#### 核心 Trait 定义
+
+```rust
+use async_trait::async_trait;
+
+/// 通知事件，由 Dispatcher 在任务完成后构建
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub task_name: String,
+    pub task_type: String,           // "git_review" / "custom"
+    pub repo_name: Option<String>,
+    pub status: String,              // "done" / "failed"
+    pub summary: String,             // 报告摘要（前 500 字）
+    pub report_path: Option<String>, // "check/my-project/2026-03-12-review.md"
+    pub duration_secs: u64,          // 任务耗时
+}
+
+/// 所有通知渠道实现此 trait
+#[async_trait]
+pub trait Notifier: Send + Sync {
+    /// 渠道名称（用于日志标识）
+    fn name(&self) -> &str;
+
+    /// 发送通知，返回 Ok(()) 或错误
+    async fn send(&self, notification: &Notification) -> Result<()>;
+}
+```
+
+#### 企业微信实现
+
+```rust
+pub struct WecomNotifier {
+    name: String,
+    client: Client,
+    webhook_url: String,
+}
+
+impl WecomNotifier {
+    pub fn new(name: String, webhook_url: String) -> Self {
+        Self {
+            name,
+            client: Client::new(),
+            webhook_url,
+        }
+    }
+}
+
+#[async_trait]
+impl Notifier for WecomNotifier {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, n: &Notification) -> Result<()> {
+        let emoji = if n.status == "done" { "✅" } else { "❌" };
+        let repo_line = n.repo_name.as_deref().unwrap_or("-");
+
+        let markdown_content = format!(
+            "{emoji} **{task_name}**\n\
+             > 仓库: {repo}\n\
+             > 状态: {status}\n\
+             > 耗时: {duration}s\n\n\
+             **摘要**\n{summary}",
+            emoji = emoji,
+            task_name = n.task_name,
+            repo = repo_line,
+            status = n.status,
+            duration = n.duration_secs,
+            summary = truncate(&n.summary, 2000),
+        );
+
+        let body = json!({
+            "msgtype": "markdown",
+            "markdown": {
+                "content": markdown_content
+            }
+        });
+
+        self.client
+            .post(&self.webhook_url)
+            .json(&body)
+            .send()
+            .await
+            .context("wecom webhook request failed")?
+            .error_for_status()
+            .context("wecom webhook returned error")?;
+
+        Ok(())
+    }
+}
+```
+
+#### Telegram 实现
+
+```rust
+pub struct TelegramNotifier {
+    name: String,
+    client: Client,
+    bot_token: String,
+    chat_id: String,
+}
+
+impl TelegramNotifier {
+    pub fn new(name: String, bot_token: String, chat_id: String) -> Self {
+        Self {
+            name,
+            client: Client::new(),
+            bot_token,
+            chat_id,
+        }
+    }
+}
+
+#[async_trait]
+impl Notifier for TelegramNotifier {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, n: &Notification) -> Result<()> {
+        let emoji = if n.status == "done" { "✅" } else { "❌" };
+        let repo_line = n.repo_name.as_deref().unwrap_or("\\-");
+
+        let text = format!(
+            "{emoji} *{task_name}*\n\
+             仓库: `{repo}`\n\
+             状态: {status}\n\
+             耗时: {duration}s\n\n\
+             *摘要*\n{summary}",
+            emoji = emoji,
+            task_name = escape_markdown(&n.task_name),
+            repo = repo_line,
+            status = n.status,
+            duration = n.duration_secs,
+            summary = truncate(&escape_markdown(&n.summary), 3000),
+        );
+
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendMessage",
+            self.bot_token
+        );
+
+        self.client
+            .post(&url)
+            .json(&json!({
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "MarkdownV2",
+            }))
+            .send()
+            .await
+            .context("telegram api request failed")?
+            .error_for_status()
+            .context("telegram api returned error")?;
+
+        Ok(())
+    }
+}
+
+/// Telegram MarkdownV2 要求转义特殊字符
+fn escape_markdown(s: &str) -> String {
+    let special = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        if special.contains(&c) {
+            result.push('\\');
+        }
+        result.push(c);
+    }
+    result
+}
+```
+
+#### WhatsApp 实现
+
+```rust
+pub struct WhatsAppNotifier {
+    name: String,
+    client: Client,
+    api_url: String,
+    access_token: String,
+    recipient: String,
+}
+
+impl WhatsAppNotifier {
+    pub fn new(
+        name: String,
+        api_url: String,
+        access_token: String,
+        recipient: String,
+    ) -> Self {
+        Self { name, client: Client::new(), api_url, access_token, recipient }
+    }
+}
+
+#[async_trait]
+impl Notifier for WhatsAppNotifier {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, n: &Notification) -> Result<()> {
+        let emoji = if n.status == "done" { "✅" } else { "❌" };
+        let repo_line = n.repo_name.as_deref().unwrap_or("-");
+
+        let text = format!(
+            "{emoji} {task_name}\n\
+             仓库: {repo}\n\
+             状态: {status}\n\
+             耗时: {duration}s\n\n\
+             摘要:\n{summary}",
+            emoji = emoji,
+            task_name = n.task_name,
+            repo = repo_line,
+            status = n.status,
+            duration = n.duration_secs,
+            summary = truncate(&n.summary, 1500),
+        );
+
+        self.client
+            .post(&self.api_url)
+            .bearer_auth(&self.access_token)
+            .json(&json!({
+                "messaging_product": "whatsapp",
+                "to": self.recipient,
+                "type": "text",
+                "text": { "body": text }
+            }))
+            .send()
+            .await
+            .context("whatsapp api request failed")?
+            .error_for_status()
+            .context("whatsapp api returned error")?;
+
+        Ok(())
+    }
+}
+```
+
+#### 通知分发器
+
+```rust
+/// 管理所有启用的通知渠道，统一广播
+pub struct NotifierDispatcher {
+    channels: Vec<Box<dyn Notifier>>,
+}
+
+impl NotifierDispatcher {
+    /// 从配置构建，仅加载 enabled = true 的渠道
+    pub fn from_config(config: &[ChannelConfig]) -> Result<Self> {
+        let mut channels: Vec<Box<dyn Notifier>> = Vec::new();
+
+        for ch in config.iter().filter(|c| c.enabled) {
+            let notifier: Box<dyn Notifier> = match ch.kind.as_str() {
+                "wecom" => Box::new(WecomNotifier::new(
+                    ch.name.clone(),
+                    ch.webhook_url.clone().context("wecom requires webhook_url")?,
+                )),
+                "telegram" => Box::new(TelegramNotifier::new(
+                    ch.name.clone(),
+                    ch.bot_token.clone().context("telegram requires bot_token")?,
+                    ch.chat_id.clone().context("telegram requires chat_id")?,
+                )),
+                "whatsapp" => Box::new(WhatsAppNotifier::new(
+                    ch.name.clone(),
+                    ch.api_url.clone().context("whatsapp requires api_url")?,
+                    ch.access_token.clone().context("whatsapp requires access_token")?,
+                    ch.recipient.clone().context("whatsapp requires recipient")?,
+                )),
+                other => {
+                    tracing::warn!(kind = other, "unknown notifier kind, skipping");
+                    continue;
+                }
+            };
+            channels.push(notifier);
+        }
+
+        Ok(Self { channels })
+    }
+
+    /// 向所有渠道广播通知（并发发送，失败仅记录日志）
+    pub async fn broadcast(&self, notification: &Notification) {
+        let futures: Vec<_> = self.channels.iter().map(|ch| {
+            let n = notification.clone();
+            let name = ch.name().to_string();
+            async move {
+                if let Err(e) = ch.send(&n).await {
+                    tracing::error!(
+                        channel = %name,
+                        error = %e,
+                        "notification send failed"
+                    );
+                } else {
+                    tracing::info!(channel = %name, "notification sent");
+                }
+            }
+        }).collect();
+
+        futures::future::join_all(futures).await;
+    }
+}
+```
+
+#### 通知配置结构体
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotifierConfig {
+    #[serde(default)]
+    pub channels: Vec<ChannelConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelConfig {
+    pub name: String,
+    pub kind: String,           // "wecom" / "telegram" / "whatsapp"
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    // 企业微信
+    pub webhook_url: Option<String>,
+
+    // Telegram
+    pub bot_token: Option<String>,
+    pub chat_id: Option<String>,
+
+    // WhatsApp
+    pub api_url: Option<String>,
+    pub access_token: Option<String>,
+    pub recipient: Option<String>,
+}
+
+fn default_true() -> bool { true }
+```
+
+#### 在 Dispatcher 中集成
+
+```rust
+// dispatcher.rs — 任务完成后触发通知
+async fn on_task_complete(task: &Task, result: &str, notifier: &NotifierDispatcher) {
+    let notification = Notification {
+        task_name: task.name.clone(),
+        task_type: task.task_type.clone(),
+        repo_name: task.repo_name.clone(),
+        status: task.status.clone(),
+        summary: truncate(result, 500).to_string(),
+        report_path: task.report_path.clone(),
+        duration_secs: task.duration_secs(),
+    };
+
+    // 异步发送，不阻塞主流程
+    let notifier = notifier.clone();
+    tokio::spawn(async move {
+        notifier.broadcast(&notification).await;
+    });
+}
+```
+
+#### 辅助函数
+
+```rust
+fn truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+```
+
+#### 各渠道 API 参考
+
+| 渠道 | API 文档 | 要点 |
+|------|---------|------|
+| 企业微信 | [群机器人配置说明](https://developer.work.weixin.qq.com/document/path/91770) | Webhook URL 直接 POST，无需 access_token 刷新 |
+| Telegram | [Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage) | 需先通过 @BotFather 创建 Bot，获取 `bot_token` |
+| WhatsApp | [Cloud API Messages](https://developers.facebook.com/docs/whatsapp/cloud-api/messages) | 需 Meta Business 账号，配置 WhatsApp Business Platform |
+
 ---
 
 ## 六、技术选型（Rust）
@@ -520,3 +942,162 @@ git-helper/
 | M3 | Codex 执行器 + 任务派发 | 手动插入任务 → 自动调用 Codex → 结果写回 DB |
 | M4 | Git 审核业务逻辑 | 端到端：配置仓库 → 定时拉取 → Codex 审核 → 输出报告 |
 | M5 | 故障恢复 + 重试 + 日志完善 | kill/restart 后任务自动恢复，日志可追踪全链路 |
+| M6 | 自动生成测试用例 | 检测新增代码 → Codex 生成测试 → 输出到 `tests-generated/` 目录 |
+
+---
+
+## 十、Feature：根据新增代码自动生成测试用例
+
+### 10.1 功能概述
+
+在定时审核的基础上新增 `test_gen` 任务类型。当检测到仓库有新增代码（新增文件或新增函数/方法）时，自动调用 Codex 为这些新增代码生成对应的单元测试用例，输出到 `tests-generated/` 目录供开发者审阅和采纳。
+
+### 10.2 执行流程
+
+```
+1. Scheduler 发现到期的 test_gen 类型任务
+2. 通过 repo_id 查询 git_repos，获取仓库信息
+3. 调用 Git MCP → git_pull 拉取最新代码
+4. 调用 Git MCP → git_diff(from=last_commit, to=HEAD) 获取变更
+5. 若无新 commit → 标记 done，跳过
+6. 解析 diff，提取新增代码片段（新文件、新增函数/方法/类）
+7. 对每个新增代码片段，组装 Prompt 调用 Codex 生成测试
+8. 将生成的测试写入 tests-generated/{repo_name}/{date}/
+9. 更新 git_repos.last_commit = HEAD
+10. 标记 tasks.status = done，通知渠道推送摘要
+```
+
+### 10.3 task_type 扩展
+
+`tasks.task_type` 枚举新增值：`test_gen`
+
+```toml
+# config.toml 中新增示例任务
+[[tasks]]
+name = "my-project-test-gen"
+task_type = "test_gen"
+repo_id = 1
+cron_expr = "0 */2 * * *"     # 每 2 小时检查一次
+```
+
+### 10.4 Codex Prompt 设计
+
+#### 主 Prompt（发送给 Codex 的完整指令）
+
+```markdown
+你是一个资深测试工程师。请根据以下新增代码为其生成高质量的单元测试用例。
+
+## 约束与要求
+
+1. **测试框架**：自动识别项目所用的测试框架并沿用（如 Rust 用 `#[cfg(test)]` + `#[test]`，Python 用 `pytest`，TypeScript 用 `vitest` 或 `jest`，Go 用 `testing` 包）。如果项目中尚无测试，根据语言选择最主流的框架。
+2. **覆盖范围**：
+   - 每个公开函数/方法至少生成 **正常路径（happy path）** 和 **异常/边界路径（edge case）** 各一个测试。
+   - 若函数有多个分支逻辑（if/match/switch），为每个分支生成至少一个测试。
+   - 若函数接受集合类型参数，生成空集合、单元素、多元素的测试。
+3. **测试命名**：使用 `test_<函数名>_<场景描述>` 格式，场景描述用蛇形命名法，清晰表达测试意图。例如：`test_calculate_total_with_empty_cart`、`test_parse_config_missing_required_field`。
+4. **Mock 与依赖**：
+   - 对外部依赖（数据库、HTTP 调用、文件系统）使用 mock/stub，不发起真实 IO。
+   - 优先使用项目已有的 mock 工具；若没有，选用语言生态中最常用的（如 Rust 的 `mockall`，Python 的 `unittest.mock`，Go 的 `gomock`）。
+5. **断言**：使用精确断言（assert_eq / assertEqual），避免宽泛的 `assert!(true)`。验证返回值、副作用、错误类型。
+6. **独立性**：每个测试用例独立运行，不依赖执行顺序，不共享可变状态。
+7. **可读性**：每个测试以简短注释说明测试意图（一行即可）。
+8. **不修改源码**：只生成测试文件，绝不修改被测源代码。
+
+## 项目上下文
+
+- 项目语言：{language}
+- 项目根目录已挂载，你可以读取任意源文件以理解上下文。
+- 项目现有测试目录：{existing_test_dir}（如果存在，请参考其风格）
+
+## 新增代码（来自最近的 git diff）
+
+```diff
+{diff_content}
+```
+
+## 输出要求
+
+1. 为每个新增的源文件生成对应的测试文件。文件路径遵循项目约定（如 Rust 在同模块内 `#[cfg(test)]` 或 `tests/` 目录，Python 在 `tests/test_<module>.py`）。
+2. 输出格式为 **完整可运行的测试代码**，开发者复制即可使用。
+3. 在输出开头提供一段摘要：列出为哪些函数生成了多少个测试，覆盖了哪些场景。
+4. 如果某段新增代码是纯配置/数据定义/常量，无需生成测试，说明跳过原因即可。
+```
+
+#### diff 预处理策略
+
+在发送给 Codex 之前，对 `git diff` 输出做预处理：
+
+| 步骤 | 说明 |
+|------|------|
+| 过滤非代码文件 | 排除 `*.md`、`*.txt`、`*.json`、`*.toml`、`*.yaml`、`*.lock`、图片、字体等 |
+| 只保留新增部分 | 仅提取 `+` 开头的行及其上下文（保留 5 行上文用于理解） |
+| 识别新增函数 | 基于 diff hunk header（`@@ ... @@` 后的函数签名）定位新增函数 |
+| 大 diff 拆分 | 若单次 diff 超过 8000 token，按文件拆分为多次 Codex 调用 |
+| 注入文件全文 | 对于新增文件（`new file mode`），传入完整文件内容而非仅 diff |
+
+#### Prompt 变量填充（Rust 侧）
+
+```rust
+fn build_test_gen_prompt(
+    language: &str,
+    existing_test_dir: &str,
+    diff_content: &str,
+) -> String {
+    format!(
+        include_str!("../prompts/test_gen.md"),
+        language = language,
+        existing_test_dir = existing_test_dir,
+        diff_content = diff_content,
+    )
+}
+```
+
+Prompt 模板存放于 `src/prompts/test_gen.md`，便于独立迭代调优。
+
+### 10.5 输出目录结构
+
+```
+tests-generated/
+  └── {repo_name}/
+      └── 2026-03-13/
+          ├── _summary.md            # 本次生成的摘要报告
+          ├── src_auth_login.rs      # 对应 src/auth/login.rs 的测试
+          ├── src_db_queries.rs      # 对应 src/db/queries.rs 的测试
+          └── ...
+```
+
+### 10.6 语言检测
+
+通过仓库文件特征自动识别主语言：
+
+| 特征文件 | 语言 |
+|---------|------|
+| `Cargo.toml` | Rust |
+| `package.json` | JavaScript/TypeScript |
+| `go.mod` | Go |
+| `pyproject.toml` / `setup.py` / `requirements.txt` | Python |
+| `pom.xml` / `build.gradle` | Java |
+
+### 10.7 通知集成
+
+复用现有 Notifier 模块，任务完成后推送摘要：
+
+```
+✅ my-project 测试生成完成
+> 新增代码: 5 个文件, 12 个函数
+> 生成测试: 28 个用例
+> 输出目录: tests-generated/my-project/2026-03-13/
+```
+
+### 10.8 配置扩展
+
+```toml
+[test_gen]
+# 过滤规则：只为匹配的文件路径生成测试
+include_patterns = ["src/**/*.rs", "lib/**/*.rs"]
+exclude_patterns = ["src/generated/**", "**/mod.rs"]
+# 单次最大处理 diff 的 token 数
+max_diff_tokens = 8000
+# 生成测试的保留天数（自动清理旧报告）
+retention_days = 30
+```

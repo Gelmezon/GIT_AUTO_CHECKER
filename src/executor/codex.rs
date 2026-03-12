@@ -1,185 +1,240 @@
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
-use reqwest::Client;
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
-use serde_json::json;
-use tokio::time::sleep;
+use tokio::task::spawn_blocking;
+use tokio::time::{sleep, timeout};
 
 use crate::config::CodexConfig;
 
 #[derive(Debug, Clone)]
 pub struct CodexExecutor {
-    client: Client,
     config: CodexConfig,
 }
 
 impl CodexExecutor {
     pub fn new(config: CodexConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .build()
-            .context("failed to build reqwest client")?;
-
-        Ok(Self { client, config })
+        validate_codex_config(&config)?;
+        Ok(Self { config })
     }
 
-    pub async fn execute(&self, prompt: &str) -> Result<String> {
-        if self.config.api_key.trim().is_empty() {
-            return Err(anyhow!("OPENAI_API_KEY is not configured"));
-        }
-
+    pub async fn execute(&self, prompt: &str, work_dir: Option<&Path>) -> Result<String> {
         let attempts = self.config.max_retries + 1;
         let mut last_error = None;
+
         for attempt in 0..attempts {
-            match self.execute_once(prompt).await {
+            match self.execute_once(prompt, work_dir).await {
                 Ok(output) => return Ok(output),
                 Err(error) => {
                     last_error = Some(error);
                     if attempt + 1 < attempts {
-                        sleep(Duration::from_secs(1 << attempt)).await;
+                        sleep(Duration::from_secs(1_u64 << attempt)).await;
                     }
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow!("codex call failed without error")))
+        Err(last_error.unwrap_or_else(|| anyhow!("codex command failed without error")))
     }
 
-    async fn execute_once(&self, prompt: &str) -> Result<String> {
-        let response = self
-            .client
-            .post(&self.config.response_url)
-            .bearer_auth(&self.config.api_key)
-            .json(&json!({
-                "model": self.config.model,
-                "input": prompt,
-            }))
-            .send()
+    async fn execute_once(&self, prompt: &str, work_dir: Option<&Path>) -> Result<String> {
+        let config = self.config.clone();
+        let prompt = prompt.to_string();
+        let work_dir = work_dir.map(Path::to_path_buf);
+
+        let execution = spawn_blocking(move || run_codex_command(&config, &prompt, work_dir));
+        let output = timeout(Duration::from_secs(self.config.timeout_secs), execution)
             .await
-            .context("failed to call responses api")?
-            .error_for_status()
-            .context("responses api returned an error status")?;
+            .context("codex exec timed out")?
+            .context("codex command join failed")??;
 
-        let payload: ResponsesApiResponse = response.json().await.context("invalid json body")?;
-        payload.output_text()
+        Ok(parse_codex_output(&output.stdout)?)
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ResponsesApiResponse {
-    #[serde(default)]
-    output: Vec<ResponseOutput>,
+#[derive(Debug)]
+struct CommandOutput {
+    stdout: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct ResponseOutput {
-    #[serde(default)]
-    content: Vec<ResponseContent>,
+fn run_codex_command(
+    config: &CodexConfig,
+    prompt: &str,
+    work_dir: Option<PathBuf>,
+) -> Result<CommandOutput> {
+    let mut command = Command::new(&config.command);
+    command.args([
+        "exec",
+        "--model",
+        &config.model,
+        "--approval-mode",
+        "never",
+        "--json",
+    ]);
+    if let Some(work_dir) = work_dir {
+        command.arg("--path").arg(work_dir);
+    }
+    command.arg(prompt);
+
+    if !config.api_key.trim().is_empty() {
+        command.env("CODEX_API_KEY", &config.api_key);
+        command.env("OPENAI_API_KEY", &config.api_key);
+    }
+
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run codex command {}", config.command))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("codex exec failed: {}", stderr);
+    }
+
+    Ok(CommandOutput {
+        stdout: String::from_utf8(output.stdout).context("codex output was not valid utf-8")?,
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct ResponseContent {
-    #[serde(default)]
-    r#type: String,
-    #[serde(default)]
-    text: String,
+fn validate_codex_config(config: &CodexConfig) -> Result<()> {
+    let has_key = !config.api_key.trim().is_empty()
+        || env::var("CODEX_API_KEY").is_ok()
+        || env::var("OPENAI_API_KEY").is_ok();
+    if !has_key {
+        bail!("CODEX_API_KEY or OPENAI_API_KEY is not configured");
+    }
+    if config.command.trim().is_empty() {
+        bail!("codex command is empty");
+    }
+    Ok(())
 }
 
-impl ResponsesApiResponse {
-    fn output_text(&self) -> Result<String> {
-        let joined = self
-            .output
-            .iter()
-            .flat_map(|item| item.content.iter())
-            .filter(|content| content.r#type == "output_text" || content.r#type.is_empty())
-            .map(|content| content.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
+fn parse_codex_output(stdout: &str) -> Result<String> {
+    let mut messages = Vec::new();
 
-        if joined.trim().is_empty() {
-            Err(anyhow!("responses api returned no output text"))
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(event) = serde_json::from_str::<CodexEvent>(line) {
+            match event {
+                CodexEvent::AgentMessage { content } if !content.trim().is_empty() => {
+                    messages.push(content);
+                }
+                CodexEvent::TurnFailed { error } => bail!("codex turn failed: {error}"),
+                CodexEvent::Other => {}
+                CodexEvent::AgentMessage { .. } => {}
+            }
         } else {
-            Ok(joined)
+            messages.push(line.to_string());
         }
     }
+
+    let output = messages.join("\n").trim().to_string();
+    if output.is_empty() {
+        bail!("codex returned no agent message");
+    }
+    Ok(output)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum CodexEvent {
+    #[serde(rename = "item.agent_message")]
+    AgentMessage { content: String },
+    #[serde(rename = "turn.failed")]
+    TurnFailed { error: String },
+    #[serde(other)]
+    Other,
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::{Json, Router, routing::post};
-    use serde_json::{Value, json};
-    use tokio::net::TcpListener;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::tempdir;
 
     use super::*;
     use crate::config::CodexConfig;
 
     #[tokio::test]
-    async fn executor_returns_output_text() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async {
-                Json(json!({
-                    "output": [{
-                        "content": [{
-                            "type": "output_text",
-                            "text": "review result"
-                        }]
-                    }]
-                }))
-            }),
+    async fn executor_parses_jsonl_agent_messages() {
+        let dir = tempdir().unwrap();
+        let command = create_fake_codex_command(
+            dir.path(),
+            "Write-Output '{\"type\":\"thread.started\"}'\nWrite-Output '{\"type\":\"item.agent_message\",\"content\":\"review result\"}'\n",
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
 
         let executor = CodexExecutor::new(CodexConfig {
             api_key: "test-key".to_string(),
+            command: command.to_string_lossy().to_string(),
             model: "gpt-5.4".to_string(),
             max_retries: 0,
             timeout_secs: 5,
-            response_url: format!("http://{address}/responses"),
         })
         .unwrap();
 
-        let output = executor.execute("hello").await.unwrap();
+        let output = executor.execute("hello", None).await.unwrap();
         assert_eq!(output, "review result");
     }
 
     #[tokio::test]
-    async fn executor_sends_prompt_payload() {
-        let app = Router::new().route(
-            "/responses",
-            post(|Json(payload): Json<Value>| async move {
-                assert_eq!(payload["input"], "payload");
-                Json(json!({
-                    "output": [{
-                        "content": [{
-                            "type": "output_text",
-                            "text": "ok"
-                        }]
-                    }]
-                }))
-            }),
+    async fn executor_includes_work_dir_argument() {
+        let dir = tempdir().unwrap();
+        let target_dir = dir.path().join("repo");
+        fs::create_dir_all(&target_dir).unwrap();
+        let capture_path = dir.path().join("args.txt");
+        let script = format!(
+            "$args -join \"\\n\" | Set-Content -Encoding utf8 '{}'\nWrite-Output '{{\"type\":\"item.agent_message\",\"content\":\"ok\"}}'\n",
+            capture_path.display()
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        let command = create_fake_codex_command(dir.path(), &script);
 
         let executor = CodexExecutor::new(CodexConfig {
             api_key: "test-key".to_string(),
+            command: command.to_string_lossy().to_string(),
             model: "gpt-5.4".to_string(),
             max_retries: 0,
             timeout_secs: 5,
-            response_url: format!("http://{address}/responses"),
         })
         .unwrap();
 
-        let output = executor.execute("payload").await.unwrap();
+        let output = executor
+            .execute("payload", Some(&target_dir))
+            .await
+            .unwrap();
         assert_eq!(output, "ok");
+
+        let args = fs::read_to_string(capture_path).unwrap();
+        assert!(args.contains("--path"));
+        assert!(args.contains(&target_dir.to_string_lossy().to_string()));
+    }
+
+    #[cfg(windows)]
+    fn create_fake_codex_command(dir: &Path, body: &str) -> PathBuf {
+        let script_path = dir.join("codex-script.ps1");
+        fs::write(&script_path, body).unwrap();
+        let wrapper = dir.join("codex.cmd");
+        fs::write(
+            &wrapper,
+            format!(
+                "@echo off\r\npowershell -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+                script_path.display()
+            ),
+        )
+        .unwrap();
+        wrapper
+    }
+
+    #[cfg(not(windows))]
+    fn create_fake_codex_command(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join("codex");
+        fs::write(&script, format!("#!/usr/bin/env bash\n{}", body)).unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+        script
     }
 }
