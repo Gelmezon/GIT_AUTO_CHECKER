@@ -16,14 +16,12 @@
       </div>
 
       <p v-if="error" class="form-error">{{ error }}</p>
-      <p v-if="notice" class="admin-notice">{{ notice }}</p>
-
       <div v-if="loading && items.length === 0" class="loading-panel">正在加载项目...</div>
       <div v-else-if="items.length === 0">
         <EmptyState
           eyebrow="暂无项目"
           title="还没有 Git 项目"
-          description="点击右上角“新增项目”后再填写仓库地址、分支和本地路径。"
+          description="点击右上角“新增项目”后填写仓库地址、分支、本地路径和可选的认证凭据。"
         />
       </div>
       <div v-else class="admin-table-wrap">
@@ -32,6 +30,7 @@
             <tr>
               <th>名称</th>
               <th>仓库地址</th>
+              <th>凭据</th>
               <th>分支</th>
               <th>Cron</th>
               <th>状态</th>
@@ -43,6 +42,7 @@
             <tr v-for="repo in items" :key="repo.id">
               <td>{{ repo.name }}</td>
               <td class="truncate-cell">{{ repo.repo_url }}</td>
+              <td>{{ repo.credential_name || '-' }}</td>
               <td>{{ repo.branch }}</td>
               <td>{{ repo.review_cron || '-' }}</td>
               <td>
@@ -50,7 +50,7 @@
                   {{ repo.enabled ? 'enabled' : 'disabled' }}
                 </span>
               </td>
-              <td>{{ formatDate(repo.updated_at) }}</td>
+              <td>{{ formatDateTime(repo.updated_at) }}</td>
               <td>
                 <div class="actions-cell">
                   <RouterLink class="ghost-button" :to="`/admin/repos/${repo.id}/edit`">
@@ -77,12 +77,14 @@ import { onMounted, ref } from 'vue'
 
 import EmptyState from '../../components/EmptyState.vue'
 import * as adminApi from '../../api/admin'
+import { useUiStore } from '../../stores/ui'
 import type { AdminRepo } from '../../types'
+import { formatDateTime } from '../../utils/date'
 
+const ui = useUiStore()
 const items = ref<AdminRepo[]>([])
 const loading = ref(false)
 const error = ref('')
-const notice = ref('')
 
 onMounted(load)
 
@@ -99,11 +101,10 @@ async function load() {
 }
 
 async function triggerSync(id: number) {
-  notice.value = ''
   error.value = ''
   try {
     const result = await adminApi.syncRepo(id)
-    notice.value = `仓库已${result.action === 'cloned' ? '克隆' : '同步'}，当前分支 ${result.branch}`
+    ui.toast('success', '仓库同步完成', `当前分支：${result.branch}`)
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '同步项目失败'
@@ -111,21 +112,23 @@ async function triggerSync(id: number) {
 }
 
 async function remove(id: number) {
-  if (!window.confirm('确认删除这个项目吗？相关任务也会一起删除。')) {
+  const confirmed = await ui.confirm({
+    title: '删除项目？',
+    description: '删除后，关联任务和运行记录也会一并移除。',
+    confirmText: '确认删除',
+    cancelText: '先保留',
+    tone: 'danger',
+  })
+  if (!confirmed) {
     return
   }
-  notice.value = ''
   error.value = ''
   try {
     await adminApi.deleteRepo(id)
-    notice.value = '项目已删除'
+    ui.toast('success', '项目已删除')
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除项目失败'
   }
-}
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleString()
 }
 </script>

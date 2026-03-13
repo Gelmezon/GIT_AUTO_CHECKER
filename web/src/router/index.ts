@@ -1,16 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import AdminLayout from '../components/admin/AdminLayout.vue'
-import ActivateView from '../views/ActivateView.vue'
-import LoginView from '../views/LoginView.vue'
-import MessagesView from '../views/MessagesView.vue'
-import AdminDashboardView from '../views/admin/Dashboard.vue'
-import RepoEditorView from '../views/admin/RepoEditor.vue'
-import AdminReposView from '../views/admin/Repos.vue'
-import TaskCreatorView from '../views/admin/TaskCreator.vue'
-import AdminTasksView from '../views/admin/Tasks.vue'
-import UserEditorView from '../views/admin/UserEditor.vue'
-import AdminUsersView from '../views/admin/Users.vue'
 import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
@@ -23,25 +12,25 @@ const router = createRouter({
     {
       path: '/login',
       name: 'login',
-      component: LoginView,
-      meta: { guestOnly: true },
+      component: () => import('../views/LoginView.vue'),
+      meta: { guestOnly: true, title: '登录' },
     },
     {
       path: '/activate',
       name: 'activate',
-      component: ActivateView,
-      meta: { guestOnly: true },
+      component: () => import('../views/ActivateView.vue'),
+      meta: { guestOnly: true, title: '激活账号' },
     },
     {
       path: '/messages/:id?',
       name: 'messages',
-      component: MessagesView,
-      meta: { requiresAuth: true },
+      component: () => import('../views/MessagesView.vue'),
+      meta: { requiresAuth: true, title: '消息中心' },
     },
     {
       path: '/admin',
-      component: AdminLayout,
-      meta: { requiresAuth: true, role: 'superAdmin' },
+      component: () => import('../components/admin/AdminLayout.vue'),
+      meta: { requiresAuth: true, role: 'superAdmin', title: '运行总览' },
       children: [
         {
           path: '',
@@ -50,47 +39,98 @@ const router = createRouter({
         {
           path: 'dashboard',
           name: 'admin-dashboard',
-          component: AdminDashboardView,
+          component: () => import('../views/admin/Dashboard.vue'),
+          meta: { title: '运行总览' },
         },
         {
           path: 'repos',
           name: 'admin-repos',
-          component: AdminReposView,
+          component: () => import('../views/admin/Repos.vue'),
+          meta: { title: '项目管理' },
         },
         {
           path: 'repos/new',
           name: 'admin-repos-new',
-          component: RepoEditorView,
+          component: () => import('../views/admin/RepoEditor.vue'),
+          meta: { title: '新增项目' },
         },
         {
           path: 'repos/:id/edit',
           name: 'admin-repos-edit',
-          component: RepoEditorView,
+          component: () => import('../views/admin/RepoEditor.vue'),
+          meta: { title: '编辑项目' },
+        },
+        {
+          path: 'credentials',
+          name: 'admin-credentials',
+          component: () => import('../views/admin/Credentials.vue'),
+          meta: { title: '凭据管理' },
+        },
+        {
+          path: 'credentials/new',
+          name: 'admin-credentials-new',
+          component: () => import('../views/admin/CredentialEditor.vue'),
+          meta: { title: '新增凭据' },
+        },
+        {
+          path: 'credentials/:id/edit',
+          name: 'admin-credentials-edit',
+          component: () => import('../views/admin/CredentialEditor.vue'),
+          meta: { title: '编辑凭据' },
         },
         {
           path: 'users',
           name: 'admin-users',
-          component: AdminUsersView,
+          component: () => import('../views/admin/Users.vue'),
+          meta: { title: '用户管理' },
         },
         {
           path: 'users/new',
           name: 'admin-users-new',
-          component: UserEditorView,
+          component: () => import('../views/admin/UserEditor.vue'),
+          meta: { title: '新增用户' },
         },
         {
           path: 'users/:id/edit',
           name: 'admin-users-edit',
-          component: UserEditorView,
+          component: () => import('../views/admin/UserEditor.vue'),
+          meta: { title: '编辑用户' },
         },
         {
           path: 'tasks',
           name: 'admin-tasks',
-          component: AdminTasksView,
+          component: () => import('../views/admin/Tasks.vue'),
+          meta: { title: '任务管理' },
         },
         {
           path: 'tasks/new',
           name: 'admin-tasks-new',
-          component: TaskCreatorView,
+          component: () => import('../views/admin/TaskEditor.vue'),
+          meta: { title: '新增任务' },
+        },
+        {
+          path: 'tasks/:id',
+          name: 'admin-task-detail',
+          component: () => import('../views/admin/TaskDetail.vue'),
+          meta: { title: '任务详情' },
+        },
+        {
+          path: 'tasks/:id/edit',
+          name: 'admin-task-edit',
+          component: () => import('../views/admin/TaskEditor.vue'),
+          meta: { title: '编辑任务' },
+        },
+        {
+          path: 'runs',
+          name: 'admin-runs',
+          component: () => import('../views/admin/Runs.vue'),
+          meta: { title: '执行记录' },
+        },
+        {
+          path: 'runs/:runId',
+          name: 'admin-run-detail',
+          component: () => import('../views/admin/RunDetail.vue'),
+          meta: { title: '执行详情' },
         },
       ],
     },

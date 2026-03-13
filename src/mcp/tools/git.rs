@@ -6,6 +6,9 @@ use git2::{
     build::RepoBuilder,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
+
+use crate::git_auth::ResolvedGitAuth;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCloneArgs {
@@ -84,16 +87,27 @@ pub struct GitStatusOutput {
     pub entries: Vec<String>,
 }
 
-pub fn git_clone(args: &GitCloneArgs) -> Result<GitCloneOutput> {
+pub fn git_clone(args: &GitCloneArgs, auth: Option<&ResolvedGitAuth>) -> Result<GitCloneOutput> {
     let mut builder = RepoBuilder::new();
     if let Some(branch) = &args.branch {
         builder.branch(branch);
     }
-    builder.fetch_options(fetch_options());
+    builder.fetch_options(fetch_options(auth));
 
-    let repo = builder
-        .clone(&args.url, Path::new(&args.path))
-        .with_context(|| format!("failed to clone {}", args.url))?;
+    let repo = match builder.clone(&args.url, Path::new(&args.path)) {
+        Ok(repo) => repo,
+        Err(error) => {
+            log_git2_error(
+                "git clone failed",
+                Some(&args.url),
+                &args.path,
+                args.branch.as_deref(),
+                auth,
+                &error,
+            );
+            return Err(error).with_context(|| format!("failed to clone {}", args.url));
+        }
+    };
     Ok(GitCloneOutput {
         path: args.path.clone(),
         branch: args.branch.clone().unwrap_or_else(|| "HEAD".to_string()),
@@ -101,18 +115,27 @@ pub fn git_clone(args: &GitCloneArgs) -> Result<GitCloneOutput> {
     })
 }
 
-pub fn git_pull(args: &GitPullArgs) -> Result<GitPullOutput> {
+pub fn git_pull(args: &GitPullArgs, auth: Option<&ResolvedGitAuth>) -> Result<GitPullOutput> {
     let repo = Repository::open(&args.path)
         .with_context(|| format!("failed to open repository {}", args.path))?;
     let branch = current_branch(&repo)?;
     let mut remote = repo
         .find_remote("origin")
         .context("origin remote not found")?;
+    let remote_url = remote.url().map(str::to_string);
     let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
-    let mut fetch = fetch_options();
-    remote
-        .fetch(&[&refspec], Some(&mut fetch), None)
-        .context("git fetch failed")?;
+    let mut fetch = fetch_options(auth);
+    if let Err(error) = remote.fetch(&[&refspec], Some(&mut fetch), None) {
+        log_git2_error(
+            "git fetch failed",
+            remote_url.as_deref(),
+            &args.path,
+            Some(&branch),
+            auth,
+            &error,
+        );
+        return Err(error).context("git fetch failed");
+    }
 
     let fetch_head = repo.find_reference(&format!("refs/remotes/origin/{branch}"))?;
     let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
@@ -221,20 +244,68 @@ pub fn git_status(args: &GitStatusArgs) -> Result<GitStatusOutput> {
     })
 }
 
-fn fetch_options() -> FetchOptions<'static> {
+fn fetch_options(auth: Option<&ResolvedGitAuth>) -> FetchOptions<'static> {
+    let auth = auth.cloned();
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, username, _allowed| {
-        Cred::credential_helper(
+    callbacks.credentials(move |_url, username, _allowed| match auth.as_ref() {
+        Some(ResolvedGitAuth::Token {
+            username: auth_username,
+            token,
+        }) => Cred::userpass_plaintext(auth_username, token),
+        Some(ResolvedGitAuth::Basic {
+            username: auth_username,
+            password,
+        }) => Cred::userpass_plaintext(auth_username, password),
+        Some(ResolvedGitAuth::Ssh {
+            username: auth_username,
+            key_path,
+        }) => Cred::ssh_key(
+            username.unwrap_or(auth_username),
+            None,
+            Path::new(key_path),
+            None,
+        ),
+        None => Cred::credential_helper(
             &git2::Config::open_default()?,
             username.unwrap_or("git"),
             None,
-        )
+        ),
     });
 
     let mut options = FetchOptions::new();
     options.remote_callbacks(callbacks);
     options.download_tags(AutotagOption::All);
     options
+}
+
+fn log_git2_error(
+    operation: &str,
+    remote_url: Option<&str>,
+    repo_path: &str,
+    branch: Option<&str>,
+    auth: Option<&ResolvedGitAuth>,
+    error: &git2::Error,
+) {
+    error!(
+        operation,
+        repo_path,
+        remote_url = remote_url.unwrap_or("<unknown>"),
+        branch = branch.unwrap_or("<unknown>"),
+        auth_mode = auth_mode_label(auth),
+        git2_code = ?error.code(),
+        git2_class = ?error.class(),
+        git2_message = %error.message(),
+        "git operation failed"
+    );
+}
+
+fn auth_mode_label(auth: Option<&ResolvedGitAuth>) -> &'static str {
+    match auth {
+        Some(ResolvedGitAuth::Token { .. }) => "token",
+        Some(ResolvedGitAuth::Basic { .. }) => "basic",
+        Some(ResolvedGitAuth::Ssh { .. }) => "ssh",
+        None => "credential-helper",
+    }
 }
 
 fn head_commit(repo: &Repository) -> Result<Option<String>> {

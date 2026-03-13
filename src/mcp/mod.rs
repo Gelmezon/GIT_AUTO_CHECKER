@@ -9,10 +9,12 @@ use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::get, routing::post};
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::config::AppConfig;
 use crate::db::Database;
+use crate::error::format_anyhow_chain;
+use crate::git_auth::{resolve_repo_auth_by_local_path, resolve_repo_auth_by_url_or_path};
 use crate::mcp::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolDefinition, ToolResponse,
 };
@@ -70,10 +72,12 @@ async fn handle_mcp(
                 request.params.unwrap_or_else(|| json!({})),
             );
             match params {
-                Ok(params) => call_tool(params)
+                Ok(params) => call_tool(&_state, params)
                     .map(|value| JsonRpcResponse::success(id.clone(), value))
                     .unwrap_or_else(|error| {
-                        JsonRpcResponse::error(id, JsonRpcError::internal(error))
+                        let error_chain = format_anyhow_chain(&error);
+                        error!(method = "tools/call", error_chain = %error_chain, "mcp tool call failed");
+                        JsonRpcResponse::error(id, JsonRpcError::internal(error_chain))
                     }),
                 Err(error) => JsonRpcResponse::error(id, JsonRpcError::invalid_params(error)),
             }
@@ -84,15 +88,22 @@ async fn handle_mcp(
     Json(response)
 }
 
-fn call_tool(params: ToolCallParams) -> Result<serde_json::Value> {
+fn call_tool(state: &AppState, params: ToolCallParams) -> Result<serde_json::Value> {
     let output = match params.name.as_str() {
         "git_clone" => {
             let args: GitCloneArgs = serde_json::from_value(params.arguments)?;
-            serde_json::to_value(git_clone(&args)?)?
+            let auth = resolve_repo_auth_by_url_or_path(
+                &state.database,
+                &state.config,
+                &args.url,
+                &args.path,
+            )?;
+            serde_json::to_value(git_clone(&args, auth.as_ref())?)?
         }
         "git_pull" => {
             let args: GitPullArgs = serde_json::from_value(params.arguments)?;
-            serde_json::to_value(git_pull(&args)?)?
+            let auth = resolve_repo_auth_by_local_path(&state.database, &state.config, &args.path)?;
+            serde_json::to_value(git_pull(&args, auth.as_ref())?)?
         }
         "git_log" => {
             let args: GitLogArgs = serde_json::from_value(params.arguments)?;

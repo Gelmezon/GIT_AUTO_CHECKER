@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::db::models::{NewMessage, Task, TaskStatus, TaskType};
+use crate::error::format_anyhow_chain;
 use crate::executor::codex::CodexExecutor;
 use crate::jobs::{self, JobOutput};
 use crate::notifier::{Notification, NotifierDispatcher};
@@ -100,7 +101,12 @@ impl Dispatcher {
         match result {
             Ok(output) => {
                 self.database
-                    .finish_task(task, TaskStatus::Done, Some(&output.task_result))?;
+                    .finish_task(
+                        task,
+                        TaskStatus::Done,
+                        Some(&output.summary),
+                        Some(&output.content),
+                    )?;
                 self.persist_message(task, &output)?;
                 info!(task_id = task.id, "task completed");
                 self.notify(
@@ -113,10 +119,10 @@ impl Dispatcher {
                 .await;
             }
             Err(error) => {
-                let message = error.to_string();
+                let message = format_anyhow_chain(&error);
                 self.database
-                    .finish_task(task, TaskStatus::Failed, Some(&message))?;
-                error!(%error, task_id = task.id, "task execution failed");
+                    .finish_task(task, TaskStatus::Failed, Some(&message), Some(&message))?;
+                error!(task_id = task.id, error_chain = %message, "task execution failed");
                 self.notify(task, TaskStatus::Failed, &message, None, None)
                     .await;
             }

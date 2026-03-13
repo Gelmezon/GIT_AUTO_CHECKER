@@ -5,8 +5,7 @@ max_concurrency = 4
 claim_batch_size = 16
 
 [codex]
-# Optional: if empty, git-helper will use the local `codex login` session.
-# api_key = "sk-..."
+api_key = ""
 command = "codex"
 model = "gpt-5.4"
 max_retries = 2
@@ -17,9 +16,12 @@ email = "caf43rer@gmail.com"
 password = "ilovekokia"
 display_name = "Super Admin"
 
+[credentials]
+encryption_key = "68d99264edd0a1188cea087ee91496f35a48a75d33c8cca1a9b34f2d454682df"
+
 [mcp]
 host = "127.0.0.1"
-port = 3100
+port = 13100
 
 [database]
 path = "data/scheduler.db"
@@ -28,24 +30,14 @@ path = "data/scheduler.db"
 check_dir = "check"
 tests_generated_dir = "tests-generated"
 
-[log]
-level = "info"
-file = "logs/git-helper.log"
+[notifier]
+channels = []
 
 [web]
 jwt_secret = "change-me-before-production"
 token_expire_hours = 168
 static_dir = "web/dist"
 
-# [[notifier.channels]]
-# name = "dev-team-wecom"
-# kind = "wecom"
-# enabled = true
-# webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
-
-# [[notifier.channels]]
-# name = "dev-team-telegram"
-# kind = "telegram"
-# enabled = false
-# bot_token = "123456:ABC-DEF"
-# chat_id = "-1001234567890"
+[log]
+level = "info"
+file = "logs/git-helper.log"

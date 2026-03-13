@@ -33,6 +33,7 @@ import MarkdownIt from 'markdown-it'
 import { computed } from 'vue'
 
 import type { MessageDetail as MessageDetailType } from '../types'
+import { formatDateTime } from '../utils/date'
 import EmptyState from './EmptyState.vue'
 
 const props = defineProps<{
@@ -52,12 +53,6 @@ const markdown = new MarkdownIt({
 const rendered = computed(() => markdown.render(props.message?.content ?? ''))
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value))
+  return formatDateTime(value)
 }
 </script>

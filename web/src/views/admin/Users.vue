@@ -16,8 +16,6 @@
       </div>
 
       <p v-if="error" class="form-error">{{ error }}</p>
-      <p v-if="notice" class="admin-notice">{{ notice }}</p>
-
       <div v-if="loading && items.length === 0" class="loading-panel">正在加载用户...</div>
       <div v-else-if="items.length === 0">
         <EmptyState
@@ -46,7 +44,7 @@
                   {{ user.activated_at ? 'active' : 'inactive' }}
                 </span>
               </td>
-              <td>{{ formatDate(user.created_at) }}</td>
+              <td>{{ formatDateTime(user.created_at) }}</td>
               <td>
                 <div class="actions-cell">
                   <RouterLink class="ghost-button" :to="`/admin/users/${user.id}/edit`">
@@ -70,12 +68,14 @@ import { onMounted, ref } from 'vue'
 
 import EmptyState from '../../components/EmptyState.vue'
 import * as adminApi from '../../api/admin'
+import { useUiStore } from '../../stores/ui'
 import type { AdminUser } from '../../types'
+import { formatDateTime } from '../../utils/date'
 
+const ui = useUiStore()
 const items = ref<AdminUser[]>([])
 const loading = ref(false)
 const error = ref('')
-const notice = ref('')
 
 onMounted(load)
 
@@ -92,21 +92,23 @@ async function load() {
 }
 
 async function remove(id: number) {
-  if (!window.confirm('确认删除这个用户吗？该用户的消息也会被一并删除。')) {
+  const confirmed = await ui.confirm({
+    title: '删除用户？',
+    description: '删除后，该用户的所有消息也会被一并清理。',
+    confirmText: '确认删除',
+    cancelText: '先保留',
+    tone: 'danger',
+  })
+  if (!confirmed) {
     return
   }
-  notice.value = ''
   error.value = ''
   try {
     await adminApi.deleteUser(id)
-    notice.value = '用户已删除'
+    ui.toast('success', '用户已删除')
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除用户失败'
   }
-}
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleString()
 }
 </script>

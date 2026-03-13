@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt};
 
-#[derive(Debug, Clone, Deserialize)]
+use crate::credentials::generate_encryption_key_hex;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -16,6 +18,8 @@ pub struct AppConfig {
     pub codex: CodexConfig,
     #[serde(default)]
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub credentials: CredentialsConfig,
     #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
@@ -30,7 +34,7 @@ pub struct AppConfig {
     pub log: LogConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SchedulerConfig {
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
@@ -42,7 +46,7 @@ pub struct SchedulerConfig {
     pub claim_batch_size: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CodexConfig {
     #[serde(default)]
     pub api_key: String,
@@ -56,7 +60,7 @@ pub struct CodexConfig {
     pub timeout_secs: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdminConfig {
     #[serde(default)]
     pub email: String,
@@ -66,7 +70,13 @@ pub struct AdminConfig {
     pub display_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CredentialsConfig {
+    #[serde(default)]
+    pub encryption_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -74,13 +84,13 @@ pub struct McpConfig {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DatabaseConfig {
     #[serde(default = "default_database_path")]
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuntimeConfig {
     #[serde(default = "default_check_dir")]
     pub check_dir: PathBuf,
@@ -88,13 +98,13 @@ pub struct RuntimeConfig {
     pub tests_generated_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct NotifierConfig {
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelConfig {
     pub name: String,
     pub kind: String,
@@ -108,7 +118,7 @@ pub struct ChannelConfig {
     pub recipient: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -116,7 +126,7 @@ pub struct LogConfig {
     pub file: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebConfig {
     #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
@@ -132,6 +142,7 @@ impl Default for AppConfig {
             scheduler: SchedulerConfig::default(),
             codex: CodexConfig::default(),
             admin: AdminConfig::default(),
+            credentials: CredentialsConfig::default(),
             mcp: McpConfig::default(),
             database: DatabaseConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -180,6 +191,14 @@ impl Default for AdminConfig {
             email: String::new(),
             password: String::new(),
             display_name: default_admin_display_name(),
+        }
+    }
+}
+
+impl Default for CredentialsConfig {
+    fn default() -> Self {
+        Self {
+            encryption_key: String::new(),
         }
     }
 }
@@ -235,6 +254,11 @@ impl AppConfig {
             config.codex.api_key = api_key;
         } else if let Ok(api_key) = env::var("OPENAI_API_KEY") {
             config.codex.api_key = api_key;
+        }
+
+        if config.credentials.encryption_key.trim().is_empty() {
+            config.credentials.encryption_key = generate_encryption_key_hex();
+            persist_generated_credentials_key(path, &config)?;
         }
 
         Ok(config)
@@ -332,8 +356,20 @@ fn default_admin_display_name() -> String {
     "Super Admin".to_string()
 }
 
+fn persist_generated_credentials_key(path: &Path, config: &AppConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let serialized =
+        toml::to_string_pretty(config).context("failed to serialize config with generated key")?;
+    fs::write(path, serialized)
+        .with_context(|| format!("failed to persist generated config {}", path.display()))
+}
+
 fn default_port() -> u16 {
-    3100
+    13100
 }
 
 fn default_database_path() -> PathBuf {

@@ -19,6 +19,7 @@
 
 <script setup lang="ts">
 import type { MessageListItem } from '../types'
+import { formatDateTime } from '../utils/date'
 
 defineProps<{
   item: MessageListItem
@@ -30,11 +31,6 @@ defineEmits<{
 }>()
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value))
+  return formatDateTime(value)
 }
 </script>

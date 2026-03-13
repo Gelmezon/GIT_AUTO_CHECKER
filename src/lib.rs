@@ -1,7 +1,9 @@
 pub mod config;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod executor;
+pub mod git_auth;
 pub mod jobs;
 pub mod mcp;
 pub mod notifier;

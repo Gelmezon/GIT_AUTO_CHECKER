@@ -2133,3 +2133,488 @@ pub struct RequireAdmin(pub AuthUser);
 3. 管理员 API 全部挂载在 `/api/admin/` 前缀下，统一通过中间件鉴权
 4. 删除操作需前端二次确认弹窗，防止误操作
 5. 日志记录所有管理员操作，便于审计
+
+---
+
+## 十六、Git 仓库认证方案
+
+### 16.1 问题背景
+
+当前系统执行 `git fetch` / `git pull` 时报错：
+```
+task execution failed error=MCP error: {"code":-32000,"message":"internal error: git fetch failed"}
+```
+原因：私有仓库需要认证凭据，系统未配置 Git 登录信息，导致拉取失败。
+
+### 16.2 认证方式支持
+
+| 平台 | 认证方式 | 凭据类型 | 说明 |
+|------|---------|---------|------|
+| GitHub | Personal Access Token (PAT) | HTTPS Token | 在 GitHub Settings → Developer settings → Personal access tokens 生成 |
+| 码云 (Gitee) | 私人令牌 | HTTPS Token | 在 Gitee 设置 → 私人令牌 生成 |
+| GitHub | SSH Key | SSH 密钥对 | `~/.ssh/id_ed25519` + deploy key |
+| 码云 (Gitee) | SSH Key | SSH 密钥对 | 同上 |
+| 通用 | 用户名 + 密码 | Basic Auth | 部分自建 GitLab 等平台 |
+
+推荐优先使用 HTTPS Token 方式，配置简单且安全可控。
+
+### 16.3 数据库表：`git_credentials`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PK | 自增主键 |
+| name | TEXT NOT NULL | 凭据名称（如 "my-github-token"） |
+| platform | TEXT NOT NULL | 平台标识：`github` / `gitee` / `gitlab` / `other` |
+| auth_type | TEXT NOT NULL | 认证类型：`token` / `ssh` / `basic` |
+| token | TEXT | Personal Access Token（加密存储） |
+| username | TEXT | 用户名（basic auth 时使用） |
+| password | TEXT | 密码（加密存储，basic auth 时使用） |
+| ssh_key_path | TEXT | SSH 私钥文件路径 |
+| created_at | DATETIME DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | DATETIME DEFAULT CURRENT_TIMESTAMP | 最后更新时间 |
+
+敏感字段（`token`、`password`）在写入数据库前使用 AES-256-GCM 加密，读取时解密。加密密钥配置于 `config.toml`。
+
+### 16.4 `git_repos` 表扩展
+
+在现有 `git_repos` 表中新增 `credential_id` 外键，关联认证凭据：
+
+| 新增字段 | 类型 | 说明 |
+|---------|------|------|
+| credential_id | INTEGER | 外键 → `git_credentials.id`，NULL 表示公开仓库无需认证 |
+
+### 16.5 config.toml 新增配置
+
+```toml
+[credentials]
+# 敏感字段加密密钥（用于加密存储 token/password）
+# 首次启动时自动生成，也可手动指定
+encryption_key = "your-32-byte-hex-key"
+```
+
+### 16.6 认证注入流程
+
+Git MCP 服务在执行 `git_clone` / `git_pull` / `git_fetch` 时，根据仓库关联的凭据自动注入认证信息：
+
+```
+git_pull(repo_path)
+    │
+    ▼
+查询 git_repos → 获取 credential_id
+    │
+    ├── credential_id = NULL → 直接执行（公开仓库）
+    │
+    └── credential_id 存在 → 查询 git_credentials
+            │
+            ├── auth_type = "token"
+            │     → HTTPS URL 注入: https://{token}@github.com/user/repo.git
+            │     → 码云: https://{token}@gitee.com/user/repo.git
+            │
+            ├── auth_type = "basic"
+            │     → HTTPS URL 注入: https://{username}:{password}@host/repo.git
+            │
+            └── auth_type = "ssh"
+                  → 设置 GIT_SSH_COMMAND="ssh -i {ssh_key_path}"
+```
+
+### 16.7 管理员 API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/admin/credentials` | 列出所有凭据（token/password 脱敏显示） |
+| POST | `/api/admin/credentials` | 新增凭据 |
+| PUT | `/api/admin/credentials/:id` | 更新凭据 |
+| DELETE | `/api/admin/credentials/:id` | 删除凭据（需检查无仓库引用） |
+| PUT | `/api/admin/repos/:id/credential` | 为仓库绑定/解绑凭据 |
+
+新增凭据请求示例：
+
+```json
+{
+  "name": "my-github-token",
+  "platform": "github",
+  "auth_type": "token",
+  "token": "ghp_xxxxxxxxxxxx"
+}
+```
+
+### 16.8 Web 管理界面扩展
+
+在管理后台新增「凭据管理」页面：
+
+- 凭据列表：名称、平台、认证类型、关联仓库数、创建时间
+- 新增/编辑弹窗：根据 `auth_type` 动态显示对应字段
+- token/password 字段输入后不再回显，仅显示 `••••••••`
+- 仓库管理页面新增「认证凭据」下拉选择框，可选择已有凭据或"无需认证"
+
+### 16.9 安全注意事项
+
+1. token / password 在数据库中 AES-256-GCM 加密存储，绝不明文
+2. API 返回凭据列表时，敏感字段脱敏（仅显示前4位 + `****`）
+3. 日志中禁止打印 token / password 原文
+4. HTTPS URL 注入时使用临时 remote URL，操作完成后恢复原 URL，避免凭据残留在 `.git/config`
+5. `encryption_key` 应通过环境变量注入，不建议硬编码在 `config.toml`
+
+---
+
+## 十七、前端页面优化与美化建议
+
+> 基于对 `web/src/` 下所有 Vue 组件、视图、样式、路由、API 层的完整审查，以下按类别给出详细优化建议。
+
+### 17.1 视觉设计与品牌一致性
+
+#### 17.1.1 配色系统增强
+- 当前暖色调（burnt orange + forest green + beige）整体协调，但缺少 **信息色（info blue）** 和 **警告色（warning yellow）**，建议补充：
+  ```css
+  --info: #2563eb;
+  --info-soft: rgba(37, 99, 235, 0.12);
+  --warning: #d97706;
+  --warning-soft: rgba(217, 119, 6, 0.12);
+  ```
+- `status-chip` 的 `running` 和 `done` 共用同一颜色（绿色），无法区分"进行中"和"已完成"。建议 `running` 使用 `--info`（蓝色脉冲动画），`done` 保持绿色。
+- 增加 `status-chip.running` 的呼吸动画：
+  ```css
+  .status-chip.running {
+    background: var(--info-soft);
+    color: var(--info);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+  ```
+
+#### 17.1.2 暗色模式支持
+- 当前仅有 `color-scheme: light`，建议增加 `prefers-color-scheme: dark` 媒体查询或手动切换：
+  ```css
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1612;
+      --bg-accent: #2a2320;
+      --card: rgba(40, 35, 30, 0.92);
+      --card-strong: #2e2822;
+      --ink: #e8e0d6;
+      --muted: #a89888;
+      --line: rgba(180, 160, 140, 0.18);
+    }
+  }
+  ```
+- 在 AdminLayout 侧边栏底部或 AppHeader 中增加主题切换按钮。
+
+#### 17.1.3 字体加载优化
+- `globals.css` 第 1 行通过 Google Fonts 加载 Cormorant Garamond + IBM Plex Sans，存在 FOUT（Flash of Unstyled Text）问题。
+- 建议：
+  1. 添加 `font-display: swap` 到 URL 参数（已有 `&display=swap`，确认生效）。
+  2. 在 `index.html` 中添加 `<link rel="preconnect" href="https://fonts.googleapis.com">` 和 `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`。
+  3. 考虑将字体文件下载到本地 `web/public/fonts/` 目录，避免外部依赖。
+
+### 17.2 交互体验（UX）优化
+
+#### 17.2.1 确认对话框升级
+- 所有删除操作（Repos.vue:116、Credentials.vue:102、Users.vue:95、Tasks.vue:128）使用 `window.confirm()`，体验生硬且无法自定义样式。
+- 建议实现自定义 `ConfirmDialog.vue` 组件：
+  - 支持标题、描述、确认/取消按钮文字自定义
+  - 危险操作使用红色确认按钮
+  - 支持键盘 Esc 关闭
+  - 带遮罩层和淡入动画
+  - 通过 `provide/inject` 或 composable（`useConfirm()`）全局调用
+
+#### 17.2.2 表单验证增强
+- 当前所有表单仅依赖 HTML5 `required` 属性和提交后的服务端错误，缺少实时反馈。
+- 建议：
+  - RepoEditor.vue：`repo_url` 增加 URL 格式校验（正则 `^https?://` 或 `git@`）
+  - RepoEditor.vue：`review_cron` 增加 Cron 表达式格式提示和前端校验
+  - CredentialEditor.vue：`token` 字段在新建模式下应为 `required`
+  - UserEditor.vue：`email` 增加格式校验提示
+  - 所有 input 增加 `focus` 和 `invalid` 状态样式：
+    ```css
+    .admin-form-grid input:focus,
+    .admin-form-grid select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .admin-form-grid input:invalid:not(:placeholder-shown) {
+      border-color: var(--danger);
+    }
+    ```
+
+#### 17.2.3 操作反馈增强
+- 成功/错误提示（`notice` / `error`）目前是静态文字，容易被忽略。
+- 建议实现全局 Toast 通知组件：
+  - 右上角弹出，3 秒后自动消失
+  - 支持 success / error / warning / info 四种类型
+  - 通过 Pinia store 或 composable 全局调用
+  - 带滑入/滑出动画
+- 删除操作成功后的 `notice` 改为 Toast，避免刷新列表后 notice 仍然残留。
+
+#### 17.2.4 加载状态优化
+- 所有页面的加载状态都是纯文字"正在加载..."，视觉单调。
+- 建议：
+  - 实现骨架屏（Skeleton）组件，表格页面用表格骨架，表单页面用表单骨架
+  - 或至少添加一个 CSS spinner 动画：
+    ```css
+    .loading-panel::before {
+      content: '';
+      width: 2rem;
+      height: 2rem;
+      border: 3px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 0.75rem;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    ```
+  - 刷新按钮在 loading 时增加旋转图标动画
+
+#### 17.2.5 空状态优化
+- EmptyState 组件缺少插图/图标，纯文字空状态不够直观。
+- 建议为 EmptyState 增加可选的 SVG 插图 slot 或内置几个默认图标（空信箱、空列表、空仪表盘）。
+
+### 17.3 布局与响应式优化
+
+#### 17.3.1 Admin 侧边栏
+- 移动端（≤980px）侧边栏直接变为单列堆叠，占据大量垂直空间。
+- 建议：
+  - 移动端改为抽屉式侧边栏（Drawer），默认隐藏，通过汉堡菜单按钮展开
+  - 增加遮罩层，点击遮罩关闭
+  - 侧边栏展开时使用 `transform: translateX()` 动画
+
+#### 17.3.2 消息列表双栏布局
+- MessagesView 在 ≤980px 时变为单列，但详情面板仍然显示在列表下方，体验不佳。
+- 建议：
+  - 移动端选中消息后隐藏列表，全屏显示详情
+  - 详情面板顶部增加"返回列表"按钮
+  - 使用 Vue `<Transition>` 实现左右滑动切换动画
+
+#### 17.3.3 表格响应式
+- 所有 admin-table 在窄屏下仅靠 `overflow: auto` 横向滚动，列多时体验差。
+- 建议：
+  - 窄屏下将表格转为卡片列表布局（每行数据变为一张卡片）
+  - 或使用 `position: sticky` 固定操作列在右侧
+  - Repos 表格有 8 列，考虑隐藏次要列（如 Cron、凭据）在窄屏下
+
+#### 17.3.4 Dashboard 统计卡片
+- `stat-grid` 在 ≤980px 时变为单列，4 张卡片纵向排列过长。
+- 建议改为 `grid-template-columns: repeat(2, 1fr)` 在平板尺寸下保持 2×2 布局。
+
+### 17.4 组件级优化
+
+#### 17.4.1 MessageDetail.vue
+- `MarkdownIt` 在每个组件实例中 `new MarkdownIt()`，如果多次挂载会重复创建。
+- 建议将 markdown 实例提取为模块级单例：
+  ```ts
+  // utils/markdown.ts
+  import MarkdownIt from 'markdown-it'
+  export const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
+  ```
+- `v-html` 渲染 markdown 存在 XSS 风险（虽然 `html: false`），建议增加 DOMPurify 消毒：
+  ```ts
+  import DOMPurify from 'dompurify'
+  const rendered = computed(() => DOMPurify.sanitize(md.render(props.message?.content ?? '')))
+  ```
+- Markdown 代码块缺少语法高亮，建议集成 `markdown-it-highlightjs` 或 `shiki`。
+
+#### 17.4.2 日期格式化不一致
+- MessageDetail.vue 使用 `Intl.DateTimeFormat('zh-CN', {...})` 格式化日期（精确到分钟）。
+- Dashboard.vue、Repos.vue、Users.vue、Tasks.vue 使用 `new Date(value).toLocaleString()`（格式因浏览器而异）。
+- 建议统一为一个 `formatDate` 工具函数：
+  ```ts
+  // utils/date.ts
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  })
+  export function formatDate(value: string): string {
+    return formatter.format(new Date(value))
+  }
+  ```
+  并增加相对时间显示（如"3 分钟前"、"昨天 14:30"）。
+
+#### 17.4.3 AdminLayout.vue 标题计算
+- `title` computed 使用大量 `if/startsWith/regex` 链，维护成本高。
+- 建议改为路由 `meta` 字段驱动：
+  ```ts
+  // router/index.ts 中每个路由增加 meta.title
+  { path: 'credentials', component: Credentials, meta: { title: '凭据管理' } }
+  ```
+  ```ts
+  // AdminLayout.vue
+  const title = computed(() => route.meta.title as string ?? '运行总览')
+  ```
+
+#### 17.4.4 RepoEditor.vue 凭据快捷入口
+- 表单底部有"先去新增凭据"链接，但位置不够醒目。
+- 建议在凭据下拉框旁边放一个小的"+"图标按钮，点击后在新标签页打开凭据创建页面，或使用弹窗内联创建。
+
+#### 17.4.5 TaskCreator.vue 改进
+- `scheduled_at` 字段是纯文本 input，用户需要手动输入日期时间格式，容易出错。
+- 建议改为 `<input type="datetime-local">` 原生日期时间选择器。
+- `prompt` textarea 可以增加字符计数和 Markdown 预览功能。
+
+### 17.5 可访问性（Accessibility）
+
+#### 17.5.1 ARIA 标签缺失
+- 所有页面缺少 ARIA landmark 和 label：
+  - AdminLayout 侧边栏 `<aside>` 应添加 `aria-label="管理导航"`
+  - 表格应添加 `aria-label` 描述
+  - 操作按钮应添加 `aria-label`（如删除按钮加 `aria-label="删除项目 xxx"`）
+  - 状态筛选 select 应添加 `aria-label="按状态筛选"`
+
+#### 17.5.2 焦点管理
+- 按钮和链接缺少可见的 `:focus-visible` 样式，键盘用户无法判断焦点位置。
+- 建议全局添加：
+  ```css
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ```
+
+#### 17.5.3 颜色对比度
+- `--muted: #695c51` 在 `--bg: #f3ece2` 上的对比度约 3.8:1，未达到 WCAG AA 标准（4.5:1）。
+- 建议将 `--muted` 调深至 `#5a4d42` 或 `#4e4238`。
+
+#### 17.5.4 表单标签关联
+- 当前表单使用 `<label>` 包裹 `<input>` 的隐式关联方式，建议同时添加 `for` / `id` 显式关联，确保屏幕阅读器正确识别。
+
+### 17.6 性能优化
+
+#### 17.6.1 路由懒加载
+- 当前 `router/index.ts` 中所有视图组件是否使用了动态 `import()`？如果是静态导入，建议改为：
+  ```ts
+  component: () => import('../views/admin/Dashboard.vue')
+  ```
+  减少首屏 JS 体积。
+
+#### 17.6.2 Google Fonts 加载
+- 外部字体加载会阻塞首次渲染。建议：
+  - 使用 `<link rel="preload" as="style">` 预加载
+  - 或将字体文件内联到项目中，通过 Vite 打包
+
+#### 17.6.3 列表虚拟滚动
+- 当消息列表或任务列表数据量大时，DOM 节点过多影响性能。
+- 建议在数据量超过 50 条时引入虚拟滚动（如 `vue-virtual-scroller`）。
+
+#### 17.6.4 API 请求去重
+- 快速点击"刷新"按钮可能触发多次并发请求。
+- 建议在 API client 层或各页面的 `load()` 函数中增加请求取消（AbortController）或防抖机制。
+
+### 17.7 代码质量与可维护性
+
+#### 17.7.1 重复代码提取
+- `formatDate()` 函数在 Dashboard.vue、Repos.vue、Users.vue、Tasks.vue 中各定义了一次，应提取到 `utils/date.ts`。
+- 列表页面（Repos、Credentials、Users）的 `load()` / `remove()` 模式高度相似，可提取为 composable：
+  ```ts
+  // composables/useCrudList.ts
+  export function useCrudList<T>(fetchFn, deleteFn, entityName) { ... }
+  ```
+
+#### 17.7.2 类型安全
+- `form.credential_id` 和 `form.repo_id` 使用 `string` 类型再 `Number()` 转换，建议统一为 `number | null`，在 select 的 `:value` 绑定处处理转换。
+
+#### 17.7.3 错误处理统一
+- 每个页面都有 `err instanceof Error ? err.message : '...'` 的重复模式。
+- 建议在 API client 层统一抛出标准化错误对象，页面层直接使用 `err.message`。
+
+### 17.8 微交互与动画
+
+#### 17.8.1 页面切换动画
+- 当前路由切换无过渡效果，建议在 `AdminLayout` 的 `<RouterView>` 外包裹 `<Transition>`：
+  ```vue
+  <RouterView v-slot="{ Component }">
+    <Transition name="fade" mode="out-in">
+      <component :is="Component" />
+    </Transition>
+  </RouterView>
+  ```
+  ```css
+  .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
+  .fade-enter-from, .fade-leave-to { opacity: 0; }
+  ```
+
+#### 17.8.2 列表项动画
+- 表格行和消息卡片的增删缺少动画，建议使用 `<TransitionGroup>` 为列表项添加淡入/滑入效果。
+
+#### 17.8.3 按钮交互反馈
+- `ghost-button` 缺少 hover 和 active 状态的视觉反馈。建议：
+  ```css
+  .ghost-button:hover {
+    background: rgba(168, 86, 42, 0.08);
+    border-color: rgba(168, 86, 42, 0.2);
+  }
+  .ghost-button:active {
+    transform: scale(0.97);
+  }
+  ```
+
+#### 17.8.4 卡片悬浮效果
+- `message-card` 和 `stat-card` 缺少 hover 效果，建议添加微妙的阴影提升：
+  ```css
+  .message-card:hover {
+    box-shadow: 0 4px 16px rgba(77, 52, 35, 0.1);
+    transform: translateY(-1px);
+    transition: all 0.2s ease;
+  }
+  .stat-card:hover {
+    box-shadow: 0 8px 24px rgba(77, 52, 35, 0.12);
+  }
+  ```
+
+### 17.9 功能增强建议
+
+#### 17.9.1 搜索与筛选
+- Repos 列表缺少搜索功能，当项目数量多时难以定位。建议增加名称/URL 关键词搜索框。
+- Credentials 列表缺少按平台/类型筛选。
+- Users 列表缺少按状态（active/inactive）筛选。
+
+#### 17.9.2 批量操作
+- 列表页面缺少批量选择和批量删除功能。建议：
+  - 表格增加 checkbox 列
+  - 顶部工具栏增加"批量删除"按钮（选中时显示）
+
+#### 17.9.3 Dashboard 增强
+- 仪表盘仅有 4 个数字统计，信息密度低。建议：
+  - 增加任务状态分布饼图或环形图（可用轻量库如 Chart.js 或纯 CSS）
+  - 增加最近 7 天执行趋势折线图
+  - 增加快捷操作入口（快速创建任务、同步所有仓库）
+
+#### 17.9.4 实时状态更新
+- 任务状态需要手动刷新才能看到变化。建议：
+  - Dashboard 和 Tasks 页面增加自动轮询（每 30 秒刷新一次）
+  - 或通过 WebSocket / SSE 实现实时推送
+
+#### 17.9.5 面包屑导航
+- Admin 子页面（如编辑凭据）缺少面包屑，用户不清楚当前位置层级。
+- 建议在 `admin-toolbar` 区域增加面包屑组件：`凭据管理 > 编辑凭据`。
+
+#### 17.9.6 键盘快捷键
+- 消息列表可增加 `j/k` 上下切换消息、`r` 刷新、`m` 标记已读等快捷键。
+- Admin 页面可增加 `n` 新建、`/` 聚焦搜索框等快捷键。
+
+### 17.10 优先级排序
+
+| 优先级 | 改进项 | 影响范围 | 工作量 |
+|--------|--------|----------|--------|
+| P0 | focus-visible 样式 + 颜色对比度修复 | 全局可访问性 | 小 |
+| P0 | formatDate 统一提取 | 5 个文件 | 小 |
+| P0 | input focus/invalid 样式 | 全局表单体验 | 小 |
+| P1 | 自定义确认对话框替换 window.confirm | 4 个页面 | 中 |
+| P1 | Toast 通知组件 | 全局反馈体验 | 中 |
+| P1 | 加载 spinner 动画 | 全局加载体验 | 小 |
+| P1 | status-chip running/done 颜色区分 | Dashboard + Tasks | 小 |
+| P1 | ghost-button hover/active 样式 | 全局按钮体验 | 小 |
+| P2 | 移动端侧边栏抽屉 | AdminLayout 响应式 | 中 |
+| P2 | 页面切换 Transition 动画 | AdminLayout | 小 |
+| P2 | 路由 meta.title 替代 if 链 | AdminLayout | 小 |
+| P2 | scheduled_at 改为 datetime-local | TaskCreator | 小 |
+| P2 | Markdown 语法高亮 + DOMPurify | MessageDetail | 中 |
+| P3 | 暗色模式 | 全局 | 大 |
+| P3 | 搜索/筛选功能 | 列表页面 | 中 |
+| P3 | Dashboard 图表 | Dashboard | 中 |
+| P3 | 虚拟滚动 | 消息/任务列表 | 中 |
+| P3 | 键盘快捷键 | 消息页面 | 中 |

@@ -31,6 +31,16 @@ pub fn api_router() -> Router<AppState> {
         .route("/messages/unread-count", get(messages::unread_count))
         .route("/admin/dashboard", get(admin::dashboard))
         .route(
+            "/admin/credentials",
+            get(admin::list_credentials).post(admin::create_credential),
+        )
+        .route(
+            "/admin/credentials/{id}",
+            get(admin::get_credential)
+                .put(admin::update_credential)
+                .delete(admin::delete_credential),
+        )
+        .route(
             "/admin/repos",
             get(admin::list_repos).post(admin::create_repo),
         )
@@ -57,8 +67,17 @@ pub fn api_router() -> Router<AppState> {
         )
         .route(
             "/admin/tasks/{id}",
-            axum::routing::delete(admin::delete_task),
+            get(admin::get_task)
+                .put(admin::update_task)
+                .delete(admin::delete_task),
         )
+        .route("/admin/tasks/{id}/pause", post(admin::pause_task))
+        .route("/admin/tasks/{id}/resume", post(admin::resume_task))
+        .route("/admin/tasks/{id}/trigger", post(admin::trigger_task))
+        .route("/admin/tasks/{id}/runs", get(admin::list_task_runs))
+        .route("/admin/runs", get(admin::list_runs))
+        .route("/admin/runs/{id}", get(admin::get_run))
+        .route("/admin/runs/{id}/cancel", post(admin::cancel_run))
 }
 
 #[derive(Debug)]
