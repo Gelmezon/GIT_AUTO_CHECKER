@@ -10,7 +10,8 @@ use cron::Schedule;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::models::{
-    GitRepo, Message, NewGitRepo, NewMessage, NewTask, NewUser, Task, TaskStatus, User,
+    GitRepo, Message, NewGitRepo, NewMessage, NewTask, NewUser, Task, TaskStatus, UpdateGitRepo,
+    UpdateUser, User,
 };
 
 #[derive(Debug, Clone)]
@@ -109,8 +110,8 @@ impl Database {
         let conn = self.open_connection()?;
         conn.execute(
             r#"
-            INSERT INTO git_repos (name, repo_url, branch, local_path, review_cron, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            INSERT INTO git_repos (name, repo_url, branch, local_path, review_cron, enabled, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
             "#,
             params![
                 repo.name,
@@ -118,6 +119,7 @@ impl Database {
                 repo.branch,
                 repo.local_path,
                 repo.review_cron,
+                repo.enabled as i64,
                 now_string(),
             ],
         )?;
@@ -153,6 +155,43 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_repo(&self, repo_id: i64, repo: &UpdateGitRepo) -> Result<bool> {
+        let conn = self.open_connection()?;
+        let updated = conn.execute(
+            r#"
+            UPDATE git_repos
+            SET name = ?1,
+                repo_url = ?2,
+                branch = ?3,
+                local_path = ?4,
+                review_cron = ?5,
+                enabled = ?6,
+                updated_at = ?7
+            WHERE id = ?8
+            "#,
+            params![
+                repo.name,
+                repo.repo_url,
+                repo.branch,
+                repo.local_path,
+                repo.review_cron,
+                repo.enabled as i64,
+                now_string(),
+                repo_id,
+            ],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn delete_repo(&self, repo_id: i64) -> Result<bool> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM tasks WHERE repo_id = ?1", [repo_id])?;
+        let deleted = tx.execute("DELETE FROM git_repos WHERE id = ?1", [repo_id])?;
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
     pub fn insert_task(&self, task: &NewTask) -> Result<i64> {
         let conn = self.open_connection()?;
         conn.execute(
@@ -184,6 +223,52 @@ impl Database {
         collect_rows(rows)
     }
 
+    pub fn list_tasks_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        page: usize,
+        page_size: usize,
+    ) -> Result<(Vec<Task>, i64)> {
+        let conn = self.open_connection()?;
+        let filter_sql = if status.is_some() {
+            " WHERE status = ?1"
+        } else {
+            ""
+        };
+
+        let total_query = format!("SELECT COUNT(*) FROM tasks{filter_sql}");
+        let total: i64 = if let Some(status) = status {
+            conn.query_row(&total_query, [status.as_str()], |row| row.get(0))?
+        } else {
+            conn.query_row(&total_query, [], |row| row.get(0))?
+        };
+
+        let offset = (page.saturating_sub(1) * page_size) as i64;
+        let query = format!(
+            "SELECT id, name, task_type, repo_id, prompt, cron_expr, scheduled_at, started_at, status, result, retry_count, created_at, updated_at FROM tasks{filter_sql} ORDER BY updated_at DESC, id DESC LIMIT ?{} OFFSET ?{}",
+            if status.is_some() { 2 } else { 1 },
+            if status.is_some() { 3 } else { 2 },
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let rows = if let Some(status) = status {
+            stmt.query_map(
+                params![status.as_str(), page_size as i64, offset],
+                Task::from_row,
+            )?
+        } else {
+            stmt.query_map(params![page_size as i64, offset], Task::from_row)?
+        };
+
+        Ok((collect_rows(rows)?, total))
+    }
+
+    pub fn delete_task(&self, task_id: i64) -> Result<bool> {
+        let conn = self.open_connection()?;
+        let deleted = conn.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
+        Ok(deleted > 0)
+    }
+
     pub fn insert_user(&self, user: &NewUser) -> Result<i64> {
         let conn = self.open_connection()?;
         conn.execute(
@@ -210,6 +295,21 @@ impl Database {
         )?;
         let rows = stmt.query_map([], User::from_row)?;
         collect_rows(rows)
+    }
+
+    pub fn update_user(&self, user_id: i64, user: &UpdateUser) -> Result<bool> {
+        let conn = self.open_connection()?;
+        let updated = conn.execute(
+            "UPDATE users SET email = ?1, display_name = ?2, updated_at = ?3 WHERE id = ?4",
+            params![user.email, user.display_name, now_string(), user_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn delete_user(&self, user_id: i64) -> Result<bool> {
+        let conn = self.open_connection()?;
+        let deleted = conn.execute("DELETE FROM users WHERE id = ?1", [user_id])?;
+        Ok(deleted > 0)
     }
 
     pub fn get_user(&self, user_id: i64) -> Result<Option<User>> {
@@ -335,6 +435,47 @@ impl Database {
             |row| row.get(0),
         )
         .map_err(Into::into)
+    }
+
+    pub fn repo_count(&self) -> Result<i64> {
+        let conn = self.open_connection()?;
+        conn.query_row("SELECT COUNT(*) FROM git_repos", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn task_count(&self) -> Result<i64> {
+        let conn = self.open_connection()?;
+        conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn user_count(&self) -> Result<i64> {
+        let conn = self.open_connection()?;
+        conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn today_executed_task_count(&self) -> Result<i64> {
+        let conn = self.open_connection()?;
+        let today_start = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .context("failed to build start of day")?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status IN ('done', 'failed') AND updated_at >= ?1",
+            [encode_datetime(today_start.and_utc())],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn recent_task_runs(&self, limit: usize) -> Result<Vec<Task>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, task_type, repo_id, prompt, cron_expr, scheduled_at, started_at, status, result, retry_count, created_at, updated_at FROM tasks WHERE status != 'pending' ORDER BY updated_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], Task::from_row)?;
+        collect_rows(rows)
     }
 
     pub fn claim_due_tasks(&self, limit: usize) -> Result<Vec<Task>> {

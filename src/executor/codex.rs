@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -99,12 +98,6 @@ fn run_codex_command(
 }
 
 fn validate_codex_config(config: &CodexConfig) -> Result<()> {
-    let has_key = !config.api_key.trim().is_empty()
-        || env::var("CODEX_API_KEY").is_ok()
-        || env::var("OPENAI_API_KEY").is_ok();
-    if !has_key {
-        bail!("CODEX_API_KEY or OPENAI_API_KEY is not configured");
-    }
     if config.command.trim().is_empty() {
         bail!("codex command is empty");
     }
@@ -176,6 +169,27 @@ mod tests {
 
         let output = executor.execute("hello", None).await.unwrap();
         assert_eq!(output, "review result");
+    }
+
+    #[tokio::test]
+    async fn executor_allows_local_codex_auth_without_api_key() {
+        let dir = tempdir().unwrap();
+        let command = create_fake_codex_command(
+            dir.path(),
+            "Write-Output '{\"type\":\"item.agent_message\",\"content\":\"ok\"}'\n",
+        );
+
+        let executor = CodexExecutor::new(CodexConfig {
+            api_key: String::new(),
+            command: command.to_string_lossy().to_string(),
+            model: "gpt-5.4".to_string(),
+            max_retries: 0,
+            timeout_secs: 5,
+        })
+        .unwrap();
+
+        let output = executor.execute("hello", None).await.unwrap();
+        assert_eq!(output, "ok");
     }
 
     #[tokio::test]

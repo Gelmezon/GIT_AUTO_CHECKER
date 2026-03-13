@@ -49,7 +49,17 @@ async function submit() {
   try {
     const response = await authApi.login(email.value, password.value)
     auth.setAuth(response.token, response.user)
-    await router.push(String(route.query.redirect ?? '/messages'))
+    const fallback = response.user.role === 'superAdmin' ? '/admin/dashboard' : '/messages'
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : fallback
+    const target =
+      response.user.role === 'superAdmin'
+        ? redirect.startsWith('/admin')
+          ? redirect
+          : fallback
+        : redirect.startsWith('/admin')
+          ? fallback
+          : redirect
+    await router.push(target)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '登录失败'
   } finally {

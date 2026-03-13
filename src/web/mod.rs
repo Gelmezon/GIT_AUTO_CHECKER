@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod messages;
 pub mod middleware;
@@ -28,6 +29,32 @@ pub fn api_router() -> Router<AppState> {
         .route("/messages/{id}/read", put(messages::mark_message_read))
         .route("/messages/read-all", put(messages::mark_all_messages_read))
         .route("/messages/unread-count", get(messages::unread_count))
+        .route("/admin/dashboard", get(admin::dashboard))
+        .route(
+            "/admin/repos",
+            get(admin::list_repos).post(admin::create_repo),
+        )
+        .route(
+            "/admin/repos/{id}",
+            put(admin::update_repo).delete(admin::delete_repo),
+        )
+        .route("/admin/repos/{id}/sync", post(admin::sync_repo))
+        .route(
+            "/admin/users",
+            get(admin::list_users).post(admin::create_user),
+        )
+        .route(
+            "/admin/users/{id}",
+            put(admin::update_user).delete(admin::delete_user),
+        )
+        .route(
+            "/admin/tasks",
+            get(admin::list_tasks).post(admin::create_task),
+        )
+        .route(
+            "/admin/tasks/{id}",
+            axum::routing::delete(admin::delete_task),
+        )
 }
 
 #[derive(Debug)]

@@ -63,13 +63,12 @@ pub async fn list_messages(
     auth_user: AuthUser,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<MessagesResponse>, ApiError> {
+    let user_id = auth_user.require_user_id()?;
     let page_size = query.page_size.clamp(1, 100);
-    let (messages, total, unread_count) = state.database.list_messages(
-        auth_user.user_id,
-        query.unread,
-        query.page.max(1),
-        page_size,
-    )?;
+    let (messages, total, unread_count) =
+        state
+            .database
+            .list_messages(user_id, query.unread, query.page.max(1), page_size)?;
 
     Ok(Json(MessagesResponse {
         total,
@@ -96,12 +95,11 @@ pub async fn get_message(
     auth_user: AuthUser,
     Path(message_id): Path<i64>,
 ) -> Result<Json<MessageDetailResponse>, ApiError> {
-    state
-        .database
-        .mark_message_read(auth_user.user_id, message_id)?;
+    let user_id = auth_user.require_user_id()?;
+    state.database.mark_message_read(user_id, message_id)?;
     let message = state
         .database
-        .get_message(auth_user.user_id, message_id)?
+        .get_message(user_id, message_id)?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "message not found"))?;
 
     Ok(Json(MessageDetailResponse {
@@ -121,9 +119,8 @@ pub async fn mark_message_read(
     auth_user: AuthUser,
     Path(message_id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    let updated = state
-        .database
-        .mark_message_read(auth_user.user_id, message_id)?;
+    let user_id = auth_user.require_user_id()?;
+    let updated = state.database.mark_message_read(user_id, message_id)?;
     if !updated {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "message not found"));
     }
@@ -134,7 +131,9 @@ pub async fn mark_all_messages_read(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> Result<Json<ReadAllResponse>, ApiError> {
-    let updated = state.database.mark_all_messages_read(auth_user.user_id)?;
+    let updated = state
+        .database
+        .mark_all_messages_read(auth_user.require_user_id()?)?;
     Ok(Json(ReadAllResponse { updated }))
 }
 
@@ -142,7 +141,9 @@ pub async fn unread_count(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> Result<Json<UnreadCountResponse>, ApiError> {
-    let unread_count = state.database.unread_message_count(auth_user.user_id)?;
+    let unread_count = state
+        .database
+        .unread_message_count(auth_user.require_user_id()?)?;
     Ok(Json(UnreadCountResponse { unread_count }))
 }
 

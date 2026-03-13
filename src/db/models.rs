@@ -20,6 +20,14 @@ pub enum TaskStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UserRole {
+    #[serde(rename = "superAdmin")]
+    SuperAdmin,
+    #[serde(rename = "user")]
+    User,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewTask {
     pub name: String,
@@ -54,6 +62,17 @@ pub struct NewGitRepo {
     pub branch: String,
     pub local_path: String,
     pub review_cron: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateGitRepo {
+    pub name: String,
+    pub repo_url: String,
+    pub branch: String,
+    pub local_path: String,
+    pub review_cron: Option<String>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +95,12 @@ pub struct NewUser {
     pub display_name: String,
     pub password_hash: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateUser {
+    pub email: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +182,15 @@ impl TaskStatus {
             "done" => Ok(Self::Done),
             "failed" => Ok(Self::Failed),
             other => Err(anyhow!("unsupported task status: {other}")),
+        }
+    }
+}
+
+impl UserRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserRole::SuperAdmin => "superAdmin",
+            UserRole::User => "user",
         }
     }
 }

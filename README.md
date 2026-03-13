@@ -67,7 +67,10 @@ cargo build --release
 ### 2. 配置环境变量
 
 ```bash
-# 二选一
+# 推荐：直接使用本机 Codex 登录态
+codex login
+
+# 可选：如果你仍想显式传 key，也支持下面两种环境变量
 export CODEX_API_KEY="sk-..."
 export OPENAI_API_KEY="sk-..."
 ```
@@ -434,8 +437,12 @@ cargo build --release
 # 2. 构建前端
 cd web && npm install && npm run build && cd ..
 
-# 3. 设置 API Key
-export CODEX_API_KEY="sk-..."
+# 3. 准备 Codex 认证
+# 推荐直接使用本机登录态
+codex login
+
+# 或者继续使用环境变量
+# export CODEX_API_KEY="sk-..."
 
 # 4. 编辑 config.toml（至少配置 notifier 和 web.jwt_secret）
 #    参考上方「编辑配置文件」章节
@@ -590,7 +597,8 @@ Type=simple
 User=git-helper
 WorkingDirectory=/opt/git-helper
 ExecStart=/opt/git-helper/git-helper run --config /opt/git-helper/config.toml
-Environment=CODEX_API_KEY=sk-...
+# Optional: only set this if you prefer env-based auth instead of `codex login`
+# Environment=CODEX_API_KEY=sk-...
 Restart=on-failure
 RestartSec=5
 
@@ -666,17 +674,20 @@ netstat -ano | findstr :3100
 # port = 3101
 ```
 
-**Q: `CODEX_API_KEY not set` 或 Codex 调用失败**
+**Q: Codex 调用失败，或提示未登录 / 找不到 `CODEX_API_KEY`**
 
 ```bash
-# 确认环境变量已设置
-echo $CODEX_API_KEY
-
 # 确认 Codex CLI 已安装且可用
 codex --version
 
 # 如果未安装：
 npm install -g @openai/codex
+
+# 推荐先登录本机 Codex
+codex login
+
+# 如果你走环境变量模式，再检查它是否已设置
+echo $CODEX_API_KEY
 
 # 也可以在 config.toml 中直接设置
 # [codex]

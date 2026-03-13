@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
                 branch,
                 local_path: local_path.to_string_lossy().to_string(),
                 review_cron,
+                enabled: true,
             };
             let id = database.insert_repo(&repo)?;
             info!(repo_id = id, "repository added");

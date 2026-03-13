@@ -15,6 +15,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub codex: CodexConfig,
     #[serde(default)]
+    pub admin: AdminConfig,
+    #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -52,6 +54,16 @@ pub struct CodexConfig {
     pub max_retries: usize,
     #[serde(default = "default_task_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminConfig {
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "default_admin_display_name")]
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +131,7 @@ impl Default for AppConfig {
         Self {
             scheduler: SchedulerConfig::default(),
             codex: CodexConfig::default(),
+            admin: AdminConfig::default(),
             mcp: McpConfig::default(),
             database: DatabaseConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -157,6 +170,16 @@ impl Default for McpConfig {
         Self {
             host: default_host(),
             port: default_port(),
+        }
+    }
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            email: String::new(),
+            password: String::new(),
+            display_name: default_admin_display_name(),
         }
     }
 }
@@ -267,6 +290,12 @@ impl AppConfig {
     }
 }
 
+impl AdminConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.email.trim().is_empty() && !self.password.is_empty()
+    }
+}
+
 fn default_interval_secs() -> u64 {
     1
 }
@@ -297,6 +326,10 @@ fn default_max_retries() -> usize {
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_admin_display_name() -> String {
+    "Super Admin".to_string()
 }
 
 fn default_port() -> u16 {

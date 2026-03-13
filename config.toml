@@ -5,11 +5,17 @@ max_concurrency = 4
 claim_batch_size = 16
 
 [codex]
-api_key = ""
+# Optional: if empty, git-helper will use the local `codex login` session.
+# api_key = "sk-..."
 command = "codex"
 model = "gpt-5.4"
 max_retries = 2
 timeout_secs = 300
+
+[admin]
+email = "caf43rer@gmail.com"
+password = "ilovekokia"
+display_name = "Super Admin"
 
 [mcp]
 host = "127.0.0.1"

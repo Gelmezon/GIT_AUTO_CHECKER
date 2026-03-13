@@ -10,6 +10,8 @@ export const useAuthStore = defineStore('auth', () => {
   const loading = ref(false)
 
   const isAuthenticated = computed(() => Boolean(token.value))
+  const isSuperAdmin = computed(() => user.value?.role === 'superAdmin')
+  const homePath = computed(() => (isSuperAdmin.value ? '/admin/dashboard' : '/messages'))
 
   function setAuth(nextToken: string, nextUser: User) {
     token.value = nextToken
@@ -40,6 +42,8 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     loading,
     isAuthenticated,
+    isSuperAdmin,
+    homePath,
     setAuth,
     hydrate,
     logout,

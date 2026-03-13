@@ -48,7 +48,7 @@ async function submit() {
   try {
     const response = await authApi.activate(email.value, password.value)
     auth.setAuth(response.token, response.user)
-    await router.push('/messages')
+    await router.push(auth.homePath)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '激活失败'
   } finally {

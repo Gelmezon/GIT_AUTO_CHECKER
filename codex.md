@@ -78,7 +78,7 @@ interval_secs = 1
 task_timeout_secs = 300        # running 超时阈值
 
 [codex]
-api_key = "sk-..."             # 或通过环境变量 OPENAI_API_KEY
+# api_key = "sk-..."           # 可选；留空时直接使用本机 `codex login`
 model = "gpt-5.4"
 max_retries = 2
 timeout_secs = 300
@@ -330,10 +330,11 @@ struct TokenUsage {
 ##### 环境变量与认证
 
 ```bash
-# 必须设置 API Key（codex exec 支持此环境变量）
-export CODEX_API_KEY="sk-..."
+# 推荐：直接使用本机 Codex 登录态
+codex login
 
-# 或者使用 OPENAI_API_KEY（codex 也认）
+# 可选：如果你希望显式传 key，也支持下面两种环境变量
+export CODEX_API_KEY="sk-..."
 export OPENAI_API_KEY="sk-..."
 ```
 
@@ -341,11 +342,7 @@ Rust 侧在启动时检查：
 
 ```rust
 fn validate_codex_env() -> Result<()> {
-    if std::env::var("CODEX_API_KEY").is_err()
-        && std::env::var("OPENAI_API_KEY").is_err()
-    {
-        bail!("必须设置 CODEX_API_KEY 或 OPENAI_API_KEY 环境变量");
-    }
+    // 无需强制 API Key；允许直接复用本机 `codex login`
     Ok(())
 }
 ```
@@ -362,7 +359,7 @@ fn validate_codex_env() -> Result<()> {
 | 结果存储 | 写回 `tasks.result`，审核任务同时写入 `check/` 目录 |
 | 超时 | `tokio::time::timeout(Duration::from_secs(300))` 包裹整个调用 |
 | 重试 | 失败后最多重试 2 次，指数退避（2s → 4s） |
-| 认证 | `CODEX_API_KEY` 或 `OPENAI_API_KEY` 环境变量 |
+| 认证 | 优先复用本机 `codex login`；也兼容 `CODEX_API_KEY` / `OPENAI_API_KEY` |
 
 ### 5.5 Git MCP 服务
 
@@ -1947,3 +1944,192 @@ git-helper/
 | M8 | REST API（登录 + 消息接口） | curl 调用登录获取 token，查询消息列表正常 |
 | M9 | Vue3 前端页面 | 登录 → 查看消息列表 → 查看报告详情 全流程通过 |
 | M10 | 集成联调 + 样式完善 | Figma 风格还原度达标，移动端响应式正常 |
+| M11 | 管理员模式 + 项目管理页面 | superAdmin 登录后可通过页面完成所有 CLI 操作 |
+| M12 | 用户管理 + 任务管理页面 | 管理员可在页面上管理用户、查看/创建任务 |
+
+---
+
+## 十五、管理员模式（superAdmin）
+
+### 15.1 设计目标
+
+将现有 CLI 操作（`add-repo`、`add-task`、`add-user`、`list-repos`、`list-tasks`、`list-users`）全部迁移到 Web 页面，由管理员通过浏览器完成，普通用户无需接触命令行。
+
+### 15.2 角色定义
+
+| 角色 | 说明 |
+|------|------|
+| `superAdmin` | 超级管理员，密码在 `config.toml` 中配置，拥有所有管理权限 |
+| `user` | 普通用户，仅可查看消息、报告，无管理权限 |
+
+- `superAdmin` 是系统内置账户，不存储在 `users` 表中，通过配置文件认证
+- 系统启动时自动识别 superAdmin 配置，无需手动 `add-user`
+
+### 15.3 config.toml 新增配置
+
+```toml
+[admin]
+email = "admin@example.com"
+password = "change-me-in-production"
+display_name = "Super Admin"
+```
+
+- `email` — 管理员登录邮箱
+- `password` — 明文密码（仅存于配置文件，登录时与输入做 bcrypt 比对或直接比对）
+- `display_name` — 页面显示名称
+
+### 15.4 登录认证流程
+
+```
+用户输入 email + password
+        │
+        ▼
+  email 匹配 config.toml [admin].email ?
+        │
+    ┌───┴───┐
+    Yes     No
+    │       │
+    ▼       ▼
+  比对密码   查询 users 表
+  (直接比对)  (bcrypt 验证)
+    │       │
+    ▼       ▼
+  签发 JWT   签发 JWT
+  role=superAdmin  role=user
+```
+
+- JWT payload 新增 `role` 字段：`"superAdmin"` 或 `"user"`
+- 后端中间件解析 token 后，将 role 注入请求上下文
+- 管理接口统一校验 `role == "superAdmin"`，否则返回 403
+
+### 15.5 后端 API 设计
+
+#### 15.5.1 Git 项目管理
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| `GET` | `/api/admin/repos` | 获取所有 Git 项目列表 | superAdmin |
+| `POST` | `/api/admin/repos` | 新增 Git 项目 | superAdmin |
+| `PUT` | `/api/admin/repos/{id}` | 编辑 Git 项目 | superAdmin |
+| `DELETE` | `/api/admin/repos/{id}` | 删除 Git 项目 | superAdmin |
+| `POST` | `/api/admin/repos/{id}/sync` | 手动触发同步 | superAdmin |
+
+新增项目请求体：
+
+```json
+{
+  "name": "my-project",
+  "repo_url": "https://github.com/org/repo.git",
+  "branch": "main",
+  "local_path": "/repos/my-project",
+  "review_cron": "0 9 * * 1-5",
+  "enabled": true
+}
+```
+
+#### 15.5.2 用户管理
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| `GET` | `/api/admin/users` | 获取所有用户列表 | superAdmin |
+| `POST` | `/api/admin/users` | 新增用户 | superAdmin |
+| `PUT` | `/api/admin/users/{id}` | 编辑用户 | superAdmin |
+| `DELETE` | `/api/admin/users/{id}` | 删除用户 | superAdmin |
+
+#### 15.5.3 任务管理
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| `GET` | `/api/admin/tasks` | 获取任务列表（支持分页/筛选） | superAdmin |
+| `POST` | `/api/admin/tasks` | 新增任务 | superAdmin |
+| `DELETE` | `/api/admin/tasks/{id}` | 删除任务 | superAdmin |
+| `GET` | `/api/admin/dashboard` | 仪表盘统计数据 | superAdmin |
+
+### 15.6 前端页面设计
+
+#### 15.6.1 新增路由
+
+```typescript
+// web/src/router/index.ts 新增
+{
+  path: '/admin',
+  component: AdminLayout,
+  meta: { requiresAuth: true, role: 'superAdmin' },
+  children: [
+    { path: '', redirect: '/admin/dashboard' },
+    { path: 'dashboard', component: () => import('@/views/admin/Dashboard.vue') },
+    { path: 'repos', component: () => import('@/views/admin/Repos.vue') },
+    { path: 'users', component: () => import('@/views/admin/Users.vue') },
+    { path: 'tasks', component: () => import('@/views/admin/Tasks.vue') },
+  ]
+}
+```
+
+- 路由守卫：检查 JWT 中的 `role`，非 superAdmin 跳转到普通用户首页
+
+#### 15.6.2 页面功能说明
+
+**Dashboard（仪表盘）**
+- 项目总数、任务总数、用户总数、今日执行任务数
+- 最近任务执行状态列表（最近 10 条）
+
+**Repos（项目管理）**
+- 表格展示所有 Git 项目：名称、仓库地址、分支、Cron 表达式、启用状态
+- 操作：新增、编辑、删除、手动同步
+- 新增/编辑弹窗表单：填写 name、repo_url、branch、local_path、review_cron、enabled
+
+**Users（用户管理）**
+- 表格展示所有用户：邮箱、显示名、激活状态、创建时间
+- 操作：新增、编辑、删除
+- 新增弹窗：填写 email、display_name（密码由用户自行激活）
+
+**Tasks（任务管理）**
+- 表格展示任务列表：任务名、类型、关联项目、Cron、状态、上次执行时间
+- 支持按状态筛选（pending / running / done / failed）
+- 操作：新增、删除
+- 新增弹窗：选择任务类型、关联项目、填写 Prompt、Cron 表达式
+
+#### 15.6.3 目录结构新增
+
+```
+web/src/
+├── views/
+│   ├── admin/
+│   │   ├── Dashboard.vue      # 仪表盘
+│   │   ├── Repos.vue          # 项目管理
+│   │   ├── Users.vue          # 用户管理
+│   │   └── Tasks.vue          # 任务管理
+│   └── ...
+├── components/
+│   ├── admin/
+│   │   ├── AdminLayout.vue    # 管理后台布局（侧边栏导航）
+│   │   ├── RepoForm.vue       # 项目新增/编辑表单
+│   │   ├── UserForm.vue       # 用户新增/编辑表单
+│   │   └── TaskForm.vue       # 任务新增表单
+│   └── ...
+└── api/
+    └── admin.ts               # 管理员 API 调用封装
+```
+
+### 15.7 权限中间件实现要点
+
+```rust
+// src/web/middleware.rs 扩展
+pub struct AuthUser {
+    pub user_id: Option<i64>,  // superAdmin 时为 None
+    pub email: String,
+    pub role: String,          // "superAdmin" | "user"
+}
+
+/// 管理员权限守卫
+pub struct RequireAdmin(pub AuthUser);
+// 从 AuthUser 中检查 role == "superAdmin"，否则返回 403
+```
+
+### 15.8 安全注意事项
+
+1. `config.toml` 中的 admin 密码应在部署时修改，避免使用默认值
+2. 生产环境建议对 `config.toml` 设置文件权限 `600`
+3. 管理员 API 全部挂载在 `/api/admin/` 前缀下，统一通过中间件鉴权
+4. 删除操作需前端二次确认弹窗，防止误操作
+5. 日志记录所有管理员操作，便于审计

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::get, routing::post};
 use serde_json::json;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
 use crate::config::AppConfig;
@@ -24,12 +24,15 @@ use crate::web::AppState;
 
 pub async fn serve(config: Arc<AppConfig>, database: Database) -> Result<()> {
     let state = AppState { config, database };
+    let index_file = state.config.web.static_dir.join("index.html");
     let app = Router::new()
         .route("/health", get(health))
         .route("/mcp", post(handle_mcp))
         .nest("/api", crate::web::api_router())
         .fallback_service(
-            ServeDir::new(&state.config.web.static_dir).append_index_html_on_directories(true),
+            ServeDir::new(&state.config.web.static_dir)
+                .append_index_html_on_directories(true)
+                .not_found_service(ServeFile::new(index_file)),
         )
         .with_state(state.clone());
 
