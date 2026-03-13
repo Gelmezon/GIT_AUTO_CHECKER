@@ -47,6 +47,10 @@ export function fetchRepos() {
   return request<AdminRepo[]>('/api/admin/repos')
 }
 
+export function fetchRepo(id: number) {
+  return request<AdminRepo>(`/api/admin/repos/${id}`)
+}
+
 export function createRepo(payload: RepoPayload) {
   return request<AdminRepo>('/api/admin/repos', {
     method: 'POST',
@@ -75,6 +79,10 @@ export function syncRepo(id: number) {
 
 export function fetchUsers() {
   return request<AdminUser[]>('/api/admin/users')
+}
+
+export function fetchUser(id: number) {
+  return request<AdminUser>(`/api/admin/users/${id}`)
 }
 
 export function createUser(payload: UserPayload) {

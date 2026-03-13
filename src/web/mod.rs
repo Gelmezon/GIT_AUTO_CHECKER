@@ -36,7 +36,9 @@ pub fn api_router() -> Router<AppState> {
         )
         .route(
             "/admin/repos/{id}",
-            put(admin::update_repo).delete(admin::delete_repo),
+            get(admin::get_repo)
+                .put(admin::update_repo)
+                .delete(admin::delete_repo),
         )
         .route("/admin/repos/{id}/sync", post(admin::sync_repo))
         .route(
@@ -45,7 +47,9 @@ pub fn api_router() -> Router<AppState> {
         )
         .route(
             "/admin/users/{id}",
-            put(admin::update_user).delete(admin::delete_user),
+            get(admin::get_user)
+                .put(admin::update_user)
+                .delete(admin::delete_user),
         )
         .route(
             "/admin/tasks",

@@ -5,8 +5,11 @@ import ActivateView from '../views/ActivateView.vue'
 import LoginView from '../views/LoginView.vue'
 import MessagesView from '../views/MessagesView.vue'
 import AdminDashboardView from '../views/admin/Dashboard.vue'
+import RepoEditorView from '../views/admin/RepoEditor.vue'
 import AdminReposView from '../views/admin/Repos.vue'
+import TaskCreatorView from '../views/admin/TaskCreator.vue'
 import AdminTasksView from '../views/admin/Tasks.vue'
+import UserEditorView from '../views/admin/UserEditor.vue'
 import AdminUsersView from '../views/admin/Users.vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -55,14 +58,39 @@ const router = createRouter({
           component: AdminReposView,
         },
         {
+          path: 'repos/new',
+          name: 'admin-repos-new',
+          component: RepoEditorView,
+        },
+        {
+          path: 'repos/:id/edit',
+          name: 'admin-repos-edit',
+          component: RepoEditorView,
+        },
+        {
           path: 'users',
           name: 'admin-users',
           component: AdminUsersView,
         },
         {
+          path: 'users/new',
+          name: 'admin-users-new',
+          component: UserEditorView,
+        },
+        {
+          path: 'users/:id/edit',
+          name: 'admin-users-edit',
+          component: UserEditorView,
+        },
+        {
           path: 'tasks',
           name: 'admin-tasks',
           component: AdminTasksView,
+        },
+        {
+          path: 'tasks/new',
+          name: 'admin-tasks-new',
+          component: TaskCreatorView,
         },
       ],
     },

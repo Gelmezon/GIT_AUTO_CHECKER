@@ -600,16 +600,80 @@ fn collect_rows<T>(
 }
 
 pub fn next_run_from_cron(expr: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    let schedule = expr.parse::<Schedule>()?;
+    let schedule = normalize_cron_expression(expr).parse::<Schedule>()?;
     schedule
         .upcoming(Utc)
         .find(|candidate| *candidate > after)
         .context("cron expression has no future schedule")
 }
 
+fn normalize_cron_expression(expr: &str) -> String {
+    let parts = expr.split_whitespace().collect::<Vec<_>>();
+    match parts.len() {
+        // Support standard 5-field cron expressions from the UI/README by
+        // prepending a zero seconds field and remapping weekday numbers
+        // from standard cron semantics (0/7=Sun, 1=Mon) to this parser.
+        5 => format!(
+            "0 {} {} {} {} {}",
+            parts[0],
+            parts[1],
+            parts[2],
+            parts[3],
+            normalize_standard_day_of_week(parts[4]),
+        ),
+        _ => expr.trim().to_string(),
+    }
+}
+
+fn normalize_standard_day_of_week(field: &str) -> String {
+    field
+        .split(',')
+        .map(normalize_standard_day_of_week_segment)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn normalize_standard_day_of_week_segment(segment: &str) -> String {
+    if segment == "*" || segment.contains(char::is_alphabetic) {
+        return segment.to_string();
+    }
+
+    let (base, step) = segment
+        .split_once('/')
+        .map_or((segment, None), |(base, step)| (base, Some(step)));
+
+    let normalized_base = if let Some((start, end)) = base.split_once('-') {
+        format!(
+            "{}-{}",
+            standard_weekday_token(start),
+            standard_weekday_token(end)
+        )
+    } else {
+        standard_weekday_token(base)
+    };
+
+    match step {
+        Some(step) => format!("{normalized_base}/{step}"),
+        None => normalized_base,
+    }
+}
+
+fn standard_weekday_token(token: &str) -> String {
+    match token.trim() {
+        "0" | "7" => "Sun".to_string(),
+        "1" => "Mon".to_string(),
+        "2" => "Tue".to_string(),
+        "3" => "Wed".to_string(),
+        "4" => "Thu".to_string(),
+        "5" => "Fri".to_string(),
+        "6" => "Sat".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
     use tempfile::tempdir;
 
     use super::*;
@@ -681,5 +745,21 @@ mod tests {
         let updated = db.mark_message_read(user_id, messages[0].id).unwrap();
         assert!(updated);
         assert_eq!(db.unread_message_count(user_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn next_run_from_five_field_cron_works() {
+        let after = Utc.with_ymd_and_hms(2026, 3, 13, 8, 30, 0).unwrap();
+        let next = next_run_from_cron("0 */1 * * 1-5", after).unwrap();
+
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 3, 13, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn next_run_from_five_field_cron_maps_sunday_correctly() {
+        let after = Utc.with_ymd_and_hms(2026, 3, 13, 8, 30, 0).unwrap();
+        let next = next_run_from_cron("0 9 * * 0", after).unwrap();
+
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 3, 15, 9, 0, 0).unwrap());
     }
 }

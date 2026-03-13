@@ -59,8 +59,12 @@ a {
 .primary-button,
 .ghost-button,
 .tab-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   cursor: pointer;
+  text-decoration: none;
   transition: 180ms ease;
 }
 
@@ -504,6 +508,11 @@ a {
   padding: 0.5rem 0.25rem 0.75rem;
 }
 
+.admin-toolbar-actions {
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
 .admin-page {
   display: grid;
   gap: 1rem;
@@ -519,6 +528,12 @@ a {
 
 .admin-page-header.compact h3 {
   font-size: 1.65rem;
+}
+
+.admin-section-copy {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .stat-grid {
@@ -587,6 +602,11 @@ a {
   width: auto;
   min-height: auto;
   margin-right: 0.6rem;
+}
+
+.checkbox-field > div {
+  display: flex;
+  align-items: center;
 }
 
 .admin-form-full {

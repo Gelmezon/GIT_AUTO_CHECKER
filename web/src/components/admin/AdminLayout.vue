@@ -4,7 +4,7 @@
       <div>
         <p class="eyebrow">git-helper</p>
         <h1>管理后台</h1>
-        <p class="admin-copy">superAdmin 可以直接通过页面管理仓库、用户和任务。</p>
+        <p class="admin-copy">superAdmin 可以在这里集中管理仓库、用户和任务。</p>
       </div>
 
       <nav class="admin-nav">
@@ -12,7 +12,7 @@
           v-for="item in navItems"
           :key="item.to"
           class="admin-nav-link"
-          :class="{ active: route.path === item.to }"
+          :class="{ active: route.path.startsWith(item.to) }"
           :to="item.to"
         >
           {{ item.label }}
@@ -35,7 +35,7 @@
           <p class="eyebrow">superAdmin</p>
           <h2>{{ title }}</h2>
         </div>
-        <p class="admin-toolbar-copy">把原本需要 CLI 的运维动作集中到浏览器里完成。</p>
+        <p class="admin-toolbar-copy">把原本需要命令行完成的管理动作收拢到浏览器里。</p>
       </header>
 
       <RouterView />
@@ -61,16 +61,15 @@ const navItems = [
 ]
 
 const title = computed(() => {
-  switch (route.path) {
-    case '/admin/repos':
-      return '项目管理'
-    case '/admin/users':
-      return '用户管理'
-    case '/admin/tasks':
-      return '任务管理'
-    default:
-      return '运行总览'
-  }
+  if (route.path.startsWith('/admin/repos/new')) return '新增项目'
+  if (/^\/admin\/repos\/\d+\/edit$/.test(route.path)) return '编辑项目'
+  if (route.path.startsWith('/admin/repos')) return '项目管理'
+  if (route.path.startsWith('/admin/users/new')) return '新增用户'
+  if (/^\/admin\/users\/\d+\/edit$/.test(route.path)) return '编辑用户'
+  if (route.path.startsWith('/admin/users')) return '用户管理'
+  if (route.path.startsWith('/admin/tasks/new')) return '新增任务'
+  if (route.path.startsWith('/admin/tasks')) return '任务管理'
+  return '运行总览'
 })
 
 async function logout() {

@@ -177,17 +177,33 @@ pub async fn list_repos(
     ))
 }
 
+pub async fn get_repo(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    AxumPath(repo_id): AxumPath<i64>,
+) -> Result<Json<AdminRepoResponse>, ApiError> {
+    let repo = state
+        .database
+        .get_repo(repo_id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "repository not found"))?;
+    info!(actor = %admin.email, repo_id, "admin repo fetched");
+    Ok(Json(repo_to_response(repo)))
+}
+
 pub async fn create_repo(
     State(state): State<AppState>,
     RequireAdmin(admin): RequireAdmin,
     Json(request): Json<CreateRepoRequest>,
 ) -> Result<(StatusCode, Json<AdminRepoResponse>), ApiError> {
+    let review_cron = normalize_optional(request.review_cron);
+    validate_cron_field(review_cron.as_deref(), "review_cron")?;
+
     let id = state.database.insert_repo(&NewGitRepo {
         name: request.name,
         repo_url: request.repo_url,
         branch: request.branch,
         local_path: request.local_path,
-        review_cron: normalize_optional(request.review_cron),
+        review_cron,
         enabled: request.enabled,
     })?;
     let repo = state
@@ -205,6 +221,9 @@ pub async fn update_repo(
     AxumPath(repo_id): AxumPath<i64>,
     Json(request): Json<UpdateRepoRequest>,
 ) -> Result<Json<AdminRepoResponse>, ApiError> {
+    let review_cron = normalize_optional(request.review_cron);
+    validate_cron_field(review_cron.as_deref(), "review_cron")?;
+
     let updated = state.database.update_repo(
         repo_id,
         &UpdateGitRepo {
@@ -212,7 +231,7 @@ pub async fn update_repo(
             repo_url: request.repo_url,
             branch: request.branch,
             local_path: request.local_path,
-            review_cron: normalize_optional(request.review_cron),
+            review_cron,
             enabled: request.enabled,
         },
     )?;
@@ -292,6 +311,19 @@ pub async fn list_users(
             .map(user_to_response)
             .collect(),
     ))
+}
+
+pub async fn get_user(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    AxumPath(user_id): AxumPath<i64>,
+) -> Result<Json<AdminUserResponse>, ApiError> {
+    let user = state
+        .database
+        .get_user(user_id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "user not found"))?;
+    info!(actor = %admin.email, user_id, "admin user fetched");
+    Ok(Json(user_to_response(user)))
 }
 
 pub async fn create_user(
@@ -388,17 +420,16 @@ pub async fn create_task(
     let task_type = TaskType::from_cli(&request.task_type)
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
     validate_task_repo(task_type, request.repo_id, &state)?;
+    let cron_expr = normalize_optional(request.cron_expr);
+    validate_cron_field(cron_expr.as_deref(), "cron_expr")?;
 
-    let scheduled_at = resolve_task_schedule(
-        normalize_optional(request.cron_expr.clone()),
-        request.scheduled_at.as_deref(),
-    )?;
+    let scheduled_at = resolve_task_schedule(cron_expr.clone(), request.scheduled_at.as_deref())?;
     let task_id = state.database.insert_task(&NewTask {
         name: request.name,
         task_type,
         repo_id: request.repo_id,
         prompt: request.prompt,
-        cron_expr: normalize_optional(request.cron_expr),
+        cron_expr,
         scheduled_at,
     })?;
 
@@ -468,6 +499,15 @@ fn parse_datetime(input: &str) -> Result<DateTime<Utc>, ApiError> {
     DateTime::parse_from_rfc3339(input)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid scheduled_at datetime"))
+}
+
+fn validate_cron_field(expr: Option<&str>, field: &str) -> Result<(), ApiError> {
+    if let Some(expr) = expr {
+        next_run_from_cron(expr, Utc::now()).map_err(|error| {
+            ApiError::new(StatusCode::BAD_REQUEST, format!("invalid {field}: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 fn repo_name_map(state: &AppState) -> Result<HashMap<i64, String>, ApiError> {
